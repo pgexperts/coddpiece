@@ -6,3 +6,6 @@ build/
 .venv/
 .pytest_cache/
 .DS_Store
+.claude
+REVIEW.md
+CLAUDE.md
