@@ -4,6 +4,12 @@ A Schema is an ordered collection of named, typed Attributes.
 It enforces the relational model's type discipline and provides
 operations needed by the algebra: compatibility checks, composition,
 projection, and renaming.
+
+Role in the overall system: foundation layer. predicates.py, relation.py,
+compiler.py, and engine.py all depend on Schema/Attribute for type checks
+and name resolution. Invariant: all schema validation happens eagerly at
+construction, so by the time a BaseRelation node exists its schema is known
+to be well-formed — downstream code never has to revalidate.
 """
 
 from __future__ import annotations
@@ -99,6 +105,8 @@ class Schema:
     attributes: tuple[Attribute, ...]
 
     def __post_init__(self):
+        # O(n^2) scan is deliberate: schemas are tiny and this runs once per
+        # construction; the cost is dominated by the error-path formatting anyway.
         names = [a.name for a in self.attributes]
         dupes = [n for n in names if names.count(n) > 1]
         if dupes:
@@ -225,6 +233,8 @@ class Schema:
 
         mapping is {new_name: old_name}.
         """
+        # Validate-then-build: all checks happen before any Attribute is
+        # constructed, so a failure leaves no half-built state.
         # Convention: mapping is {new_name: old_name}, which looks backwards but
         # matches the relation.rename(new='old') kwarg syntax where the keyword
         # IS the new name.
@@ -251,6 +261,9 @@ class Schema:
     def subtract(self, other: Schema) -> Schema:
         """Attributes in self but not in other (by name). Used only by Division
         to compute the result schema (dividend attrs minus divisor attrs)."""
+        # Name-only subtraction (domains ignored): Division's schema-validity
+        # check for matching domains happens elsewhere; this just shapes the
+        # result schema. Preserves left-side order.
         other_names = set(other.names())
         return Schema(tuple(a for a in self.attributes if a.name not in other_names))
 

@@ -3,6 +3,20 @@
 Walks the expression tree and generates parameterized SQL.
 Optimizes for readability: base relations are referenced directly
 as table names rather than wrapped in unnecessary subqueries.
+
+Role in the system: this is the visitor layer between the algebra tree
+(relation.py) and the DB adapter (engine.py). The teaching goal is
+clean, idiomatic SQL output that a student can read and recognize —
+not the smallest or fastest SQL, but SQL that mirrors the algebra.
+
+Hard invariants enforced here:
+  * All literal values flow through self.params; they are NEVER
+    string-interpolated into the SQL text. This is both a security
+    rule (no injection) and a teaching rule (students should see
+    that literals become bind parameters).
+  * Each expression node is visited exactly once per compile, with
+    one documented exception: Division, which needs the dividend
+    subtree twice to build its correlated subquery.
 """
 
 from __future__ import annotations
@@ -81,6 +95,14 @@ class Compiler:
         For base relations: returns ("table_name", "table_name")
         For complex expressions: returns ("(subquery) AS t1", "t1")
         """
+        # KEY OPTIMIZATION POINT. Called wherever the compiler needs a
+        # FROM-clause source. Without this inlining, every algebra node
+        # would become a nested subquery — correct, but unreadable and
+        # unlike idiomatic SQL. By returning the bare table name for a
+        # Relation leaf, chains like σ(π(R)) produce a single SELECT
+        # against R instead of SELECT ... FROM (SELECT ... FROM R).
+        # Extending inlining to more node kinds is the main lever for
+        # improving output quality; see CLAUDE.md.
         if isinstance(node, Relation):
             name = self._qi(node._table_name)
             return name, node._table_name
@@ -124,6 +146,17 @@ class Compiler:
     def _compile_projection(self, node: Projection) -> str:
         cols = ", ".join(self._qi(n) for n in node.attrs)
 
+        # KEY OPTIMIZATION POINT — the canonical chain-flattening pattern.
+        # π(σ(R)) is the most common algebra idiom, and nesting it as
+        # SELECT ... FROM (SELECT ... WHERE ...) would be visually noisy
+        # for students. Collapsing into one SELECT...WHERE produces SQL
+        # that mirrors how a human would write the same query.
+        #
+        # Tradeoff: we only peek one level down. Deeper algebra (e.g.,
+        # π(σ(π(σ(R))))) still nests. Generalizing this is the template
+        # CLAUDE.md points at for future compiler work — any similar
+        # pattern (e.g., σ(π(R)) → σ pushed into the projection's SELECT)
+        # would extend the same idea.
         # Chain-flattening optimization: merge Projection(Selection(X)) into a
         # single SELECT...WHERE instead of nesting a subquery. Only one level
         # is flattened — deeper nesting still produces subqueries.
@@ -391,6 +424,16 @@ class Compiler:
     # --- Division ---
 
     def _compile_division(self, node: Division) -> str:
+        # DOCUMENTED INVARIANT EXCEPTION: the compiler visits each node once
+        # per compile — except here. Relational division has no single-SELECT
+        # SQL equivalent; the standard encoding is a correlated
+        # NOT EXISTS ( divisor EXCEPT (dividend-rows-for-this-key) ) which
+        # requires two independent references to the dividend subtree with
+        # distinct aliases. We therefore call _visit on node.left (or emit
+        # its table name) a second time below. Re-visiting is safe because
+        # _visit is pure w.r.t. the tree; the only side effect is appending
+        # to self.params, and re-binding literals for the inner reference
+        # is correct — each occurrence of a literal needs its own placeholder.
         # Division uses the "NOT EXISTS (divisor EXCEPT correlated dividend)"
         # pattern. This is the only operation that visits the same subtree
         # (the dividend) twice — once for the outer FROM, once for the inner
@@ -489,6 +532,11 @@ class Compiler:
         right_schema: Any = None,
     ) -> str:
         if isinstance(operand, Literal):
+            # HARD INVARIANT: every literal value is bound as a parameter.
+            # No path through this compiler may str-format a user value
+            # into SQL text. This is both a security rule (prevents
+            # injection) and a teaching rule (the emitted SQL should show
+            # placeholders, matching how real application code is written).
             # Literal values become parameterized placeholders — never
             # interpolated into SQL. Append first, then emit placeholder
             # (placeholder index is based on current params length).

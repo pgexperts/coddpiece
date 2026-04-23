@@ -27,6 +27,20 @@ class BaseRelation(ABC):
 
     This is the heart of the package. Every operation returns a new
     BaseRelation, enabling method chaining and lazy evaluation.
+
+    Subclass contract (enforced by @abstractmethod):
+      - _engine:       the Engine that will run this node; interior nodes
+                       delegate to a child, leaves own it directly.
+      - _schema():     compute the output schema. Must be side-effect-free
+                       and cheap enough to call during tree construction,
+                       because __post_init__ validation and the Attr proxy
+                       both invoke it repeatedly.
+      - relation_name: a short string used by display/error messages only.
+
+    Lifecycle: nodes are constructed eagerly (validating schemas and engine
+    identity on the spot) but execute nothing until .collect() / __iter__ /
+    .count() is called. This is the core "trees are cheap, trips to the DB
+    are not" contract the rest of the package relies on.
     """
 
     @property
@@ -140,6 +154,13 @@ class BaseRelation(ABC):
         return Grouping(self, keys, aggs)
 
     # --- Materialization ---
+    #
+    # These are the ONLY methods on BaseRelation that actually hit the
+    # database. Construction, chaining, schema inspection, algebra(), sql(),
+    # tree(), and explain() are all pure — they build or read the tree.
+    # Anything that touches real rows goes through .collect() (or the bag
+    # wrapper's equivalent), which in turn asks the engine to compile and
+    # execute the expression.
 
     def collect(self) -> list[tuple]:
         """Execute the expression and return all rows as a list of tuples."""
@@ -259,7 +280,14 @@ def _check_same_engine(left: BaseRelation, right: BaseRelation) -> Engine:
 
 
 class Relation(BaseRelation):
-    """A base relation backed by a real database table."""
+    """A base relation backed by a real database table.
+
+    The sole LEAF type in the expression tree. Every other node in this
+    module is an interior node whose engine/schema is derived from its
+    children; a Relation is where that derivation bottoms out.
+    Not a frozen dataclass because the name-mangled private fields
+    (below) are explicitly mutable-at-construction-only by convention.
+    """
 
     def __init__(self, engine: Engine, table_name: str, schema: Schema):
         # Double-underscore names trigger Python name mangling, preventing
@@ -294,7 +322,12 @@ class Relation(BaseRelation):
 # schema) instead of the dataclass default which would expose internal fields.
 @dataclass(frozen=True, repr=False)
 class Selection(BaseRelation):
-    """σ (Selection): Filter rows by a predicate."""
+    """σ (Selection): Filter rows by a predicate.
+
+    Schema is pass-through: selection never changes the set of columns,
+    only the set of rows. The predicate was already validated against the
+    schema when the Attr proxy built it, so no __post_init__ check here.
+    """
 
     child: BaseRelation
     predicate: PredicateNode
@@ -313,7 +346,12 @@ class Selection(BaseRelation):
 
 @dataclass(frozen=True, repr=False)
 class Projection(BaseRelation):
-    """π (Projection): Keep only specified attributes."""
+    """π (Projection): Keep only specified attributes.
+
+    Set-semantic: duplicates introduced by dropping columns are eliminated
+    by the compiler's DISTINCT. The compiler also recognizes the common
+    Projection(Selection(Relation)) chain and emits a single SELECT for it.
+    """
 
     child: BaseRelation
     attrs: tuple[str, ...]
@@ -342,7 +380,11 @@ class Projection(BaseRelation):
 
 @dataclass(frozen=True, repr=False)
 class Rename(BaseRelation):
-    """ρ (Rename): Rename attributes. mapping is {new_name: old_name}."""
+    """ρ (Rename): Rename attributes. mapping is {new_name: old_name}.
+
+    The {new: old} direction (rather than {old: new}) is deliberate so the
+    kwargs call site reads like variable assignment: .rename(n='name').
+    """
 
     child: BaseRelation
     mapping: dict[str, str]
@@ -368,6 +410,13 @@ class _SetOp(BaseRelation):
 
     All three share the same validation (same engine, compatible schemas)
     and the same schema rule (left schema wins).
+
+    Eager schema-compatibility validation is a teaching choice: UNION /
+    INTERSECT / EXCEPT in SQL will happily silently succeed on
+    position-matching columns with mismatched meaning. Here we raise at
+    construction so students see the error at the source line they wrote.
+    Not a frozen dataclass: the op_name parameter differs per subclass,
+    so we use ordinary __init__ instead of field defaults.
     """
 
     def __init__(self, left: BaseRelation, right: BaseRelation, op_name: str):
@@ -399,21 +448,32 @@ class _SetOp(BaseRelation):
 
 
 class Union(_SetOp):
-    """∪ (Union): All tuples in either relation."""
+    """∪ (Union): All tuples in either relation.
+
+    Set-semantic: duplicates across the two inputs collapse. The compiler
+    emits plain UNION (not UNION ALL) to preserve this.
+    """
 
     def __init__(self, left: BaseRelation, right: BaseRelation):
         super().__init__(left, right, "UNION")
 
 
 class Intersect(_SetOp):
-    """∩ (Intersect): Tuples in both relations."""
+    """∩ (Intersect): Tuples in both relations.
+
+    Commutative in theory; we still keep left/right ordering to preserve
+    the display tree's left-to-right reading for students.
+    """
 
     def __init__(self, left: BaseRelation, right: BaseRelation):
         super().__init__(left, right, "INTERSECT")
 
 
 class Difference(_SetOp):
-    """− (Difference): Tuples in left but not in right."""
+    """− (Difference): Tuples in left but not in right.
+
+    Non-commutative; left/right order is load-bearing.
+    """
 
     def __init__(self, left: BaseRelation, right: BaseRelation):
         # Relational algebra calls it "difference"; SQL calls it EXCEPT.
@@ -426,7 +486,12 @@ class Difference(_SetOp):
 
 
 class CrossProduct(BaseRelation):
-    """× (Cross Product): Cartesian product."""
+    """× (Cross Product): Cartesian product.
+
+    Requires disjoint attribute names across the two relations — the
+    result schema has no notion of "left.x vs right.x". Use Rename first
+    if there are collisions.
+    """
 
     def __init__(self, left: BaseRelation, right: BaseRelation):
         self.left = left
@@ -448,7 +513,11 @@ class CrossProduct(BaseRelation):
 
 
 class NaturalJoin(BaseRelation):
-    """⋈ (Natural Join): Join on common attributes."""
+    """⋈ (Natural Join): Join on common attributes.
+
+    Uses join_compose (not compose) for the result schema: common
+    attributes appear once in the output, not twice.
+    """
 
     def __init__(self, left: BaseRelation, right: BaseRelation):
         self.left = left
@@ -482,7 +551,13 @@ class NaturalJoin(BaseRelation):
 
 
 class ThetaJoin(BaseRelation):
-    """⋈θ (Theta Join): Join with an arbitrary predicate."""
+    """⋈θ (Theta Join): Join with an arbitrary predicate.
+
+    Defined classically as σ_θ(R × S), so the schema rule matches
+    CrossProduct: names across the two sides must be disjoint. The
+    predicate is NOT validated against the composed schema here — the
+    Attr proxy already validated each side when it was built.
+    """
 
     def __init__(self, left: BaseRelation, right: BaseRelation, predicate: PredicateNode):
         self.left = left
@@ -505,7 +580,13 @@ class ThetaJoin(BaseRelation):
 
 
 class Equijoin(BaseRelation):
-    """⋈= (Equijoin): Join where left_attr = right_attr."""
+    """⋈= (Equijoin): Join where left_attr = right_attr.
+
+    Sits between ThetaJoin (fully general, full compose schema) and
+    NaturalJoin (implicit, all common attrs). Here the join attribute
+    names can differ, but the right-side join column is dropped from the
+    output so the result has no redundant column.
+    """
 
     def __init__(self, left: BaseRelation, right: BaseRelation,
                  left_attr: str, right_attr: str):
@@ -560,7 +641,12 @@ class Equijoin(BaseRelation):
 
 
 class Semijoin(BaseRelation):
-    """⋉ (Semijoin): Left tuples that have a match in right."""
+    """⋉ (Semijoin): Left tuples that have a match in right.
+
+    Output schema is the LEFT schema only — the right relation acts as a
+    filter. Guarded to require at least one common attribute, since a
+    semijoin with no join condition would be degenerate.
+    """
 
     def __init__(self, left: BaseRelation, right: BaseRelation):
         self.left = left
@@ -586,7 +672,12 @@ class Semijoin(BaseRelation):
 
 
 class Antijoin(BaseRelation):
-    """▷ (Antijoin): Left tuples with NO match in right."""
+    """▷ (Antijoin): Left tuples with NO match in right.
+
+    Dual of Semijoin: same schema rule (left-only), same common-attribute
+    requirement. Compiled as NOT EXISTS / EXCEPT rather than LEFT JOIN
+    WHERE NULL so NULLs in the right side don't produce false matches.
+    """
 
     def __init__(self, left: BaseRelation, right: BaseRelation):
         self.left = left
@@ -612,7 +703,12 @@ class Antijoin(BaseRelation):
 
 
 class OuterJoin(BaseRelation):
-    """⟕⟖⟗ (Outer Join): Join preserving unmatched tuples."""
+    """⟕⟖⟗ (Outer Join): Join preserving unmatched tuples.
+
+    `how` is validated against VALID_HOW at construction to catch typos
+    before execution. Only three directions are meaningful; we validate
+    explicitly rather than trusting the DB to reject bad SQL later.
+    """
 
     VALID_HOW = ("left", "right", "full")
 
@@ -649,7 +745,13 @@ class OuterJoin(BaseRelation):
 
 
 class Grouping(BaseRelation):
-    """γ (Grouping/Aggregation)."""
+    """γ (Grouping/Aggregation).
+
+    Unlike most nodes, Grouping's output schema is not a function of the
+    child's columns alone — it's (group keys) ++ (aggregate output
+    columns), with aggregate domains inferred via AggSpec.output_domain.
+    Validated eagerly: unknown group keys fail at construction.
+    """
 
     def __init__(self, child: BaseRelation, keys: tuple[str, ...], aggs: dict[str, Any]):
         self.child = child
@@ -692,7 +794,19 @@ class Grouping(BaseRelation):
 
 
 class Division(BaseRelation):
-    """÷ (Division): Tuples associated with ALL tuples in the divisor."""
+    """÷ (Division): Tuples associated with ALL tuples in the divisor.
+
+    The one deliberate exception to the compiler's "visit each node
+    once" invariant: the SQL form of R ÷ S correlates R against itself
+    (roughly: R − π_{R−S}((π_{R−S}(R) × S) − R)), so the dividend
+    subtree is emitted twice. See compiler._compile_division for the
+    mechanics.
+
+    Schema constraints (validated here, not at compile time):
+      - divisor's attributes must be a SUBSET of dividend's
+      - divisor must have STRICTLY fewer attributes; equal sets would
+        leave a zero-attribute result schema, which is meaningless.
+    """
 
     def __init__(self, left: BaseRelation, right: BaseRelation):
         self.left = left

@@ -3,6 +3,10 @@
 These are the classic datasets used in relational algebra teaching:
 - Suppliers and Parts (C.J. Date)
 - Employees and Departments (introductory)
+
+Each factory materializes tables on the supplied engine (side effect) and
+returns Relation handles; tutorial, README, and test code all depend on the
+exact row values below remaining stable.
 """
 
 from __future__ import annotations
@@ -20,6 +24,14 @@ if TYPE_CHECKING:
 
 def suppliers_and_parts(engine: Engine) -> tuple[Relation, Relation, Relation]:
     """Create the classic Date suppliers-and-parts dataset.
+
+    The S/P/SP values below are the canonical figures reproduced across
+    decades of textbooks and exam questions; expected results in the
+    tutorial assume exactly these rows. S5 intentionally ships no parts
+    so antijoin/division examples have a non-trivial answer.
+
+    Side effect: creates tables ``s``, ``p``, ``sp`` on ``engine``
+    (assumes those names are free).
 
     Returns:
         (s, p, sp) — Suppliers, Parts, and Shipments relations.
@@ -77,6 +89,10 @@ def suppliers_and_parts(engine: Engine) -> tuple[Relation, Relation, Relation]:
 
 def employees_db(engine: Engine) -> tuple[Relation, Relation]:
     """Create a simple employees/departments dataset.
+
+    Row counts are kept small (4 departments, 8 employees) so students can
+    verify join/aggregate results by hand. Side effect: creates tables
+    ``employees`` and ``departments`` on ``engine``.
 
     Returns:
         (employees, departments) relations.

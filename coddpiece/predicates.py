@@ -24,6 +24,11 @@ if TYPE_CHECKING:
 class Literal:
     """A constant value in a predicate (e.g., 50000, 'London')."""
 
+    # Wrapping raw Python values in a Literal node (rather than leaving them
+    # bare) gives the compiler a uniform Attr|Literal dispatch: Attr -> column
+    # reference, Literal -> `?` placeholder + appended param. This is what
+    # makes the "literals never interpolated" SQL-safety invariant easy to
+    # enforce in compiler.py and Predicate.sql().
     value: Any
 
     def __repr__(self) -> str:
@@ -123,6 +128,9 @@ SQL_OPERATORS = {
 class Predicate:
     """A binary comparison predicate (e.g., salary > 50000)."""
 
+    # Leaves of the predicate tree are always Attr or Literal — never a nested
+    # Predicate. Logical composition lives in CompoundPredicate/NotPredicate,
+    # keeping the comparison node shape simple and easy to compile.
     op: str
     left: Attr | Literal
     right: Attr | Literal
@@ -151,6 +159,9 @@ class Predicate:
 
     def algebra(self) -> str:
         """Render as relational algebra notation."""
+        # Attr renders as the bare column name (not qualified with the
+        # relation), matching textbook σ-notation. Literals fall through to
+        # Literal.__repr__ which quotes strings and repr's everything else.
         left = self.left.name if isinstance(self.left, Attr) else repr(self.left)
         right = self.right.name if isinstance(self.right, Attr) else repr(self.right)
         sym = ALGEBRA_SYMBOLS[self.op]
@@ -254,6 +265,9 @@ class NotPredicate:
         return f"¬({self.operand.algebra()})"
 
     def sql(self, dialect: Any = None) -> tuple[str, list]:
+        # Always parenthesize the inner fragment — NOT has higher precedence
+        # than AND/OR in SQL, so `NOT a AND b` would bind wrong. Parens make
+        # the generated SQL precedence-safe regardless of what `operand` is.
         inner_sql, params = self.operand.sql(dialect)
         return f"NOT ({inner_sql})", params
 

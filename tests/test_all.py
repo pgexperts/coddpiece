@@ -1,4 +1,13 @@
-"""Comprehensive tests for the relational algebra package."""
+"""Comprehensive tests for the relational algebra package.
+
+End-to-end coverage for schema → predicates → relation → compiler → engine,
+plus display, aggregates, and error paths. All tests run against SQLite
+in-memory via the shared fixtures in conftest.py (`engine`, `sp_data`,
+`emp_data`). The classes below are grouped into "phases" that mirror the
+teaching progression of the library — foundation, set ops, joins,
+aggregation, division, display, polish — so new tests should slot into
+the phase whose invariants they exercise.
+"""
 
 import pytest
 from coddpiece import (
@@ -12,8 +21,17 @@ from coddpiece.predicates import Attr, Predicate
 # ===================================================================
 # Phase 1: Foundation
 # ===================================================================
+# Protects the building blocks: Schema/Attribute construction and algebra,
+# Engine bootstrap (create + introspect), Attr-proxy predicate capture, and
+# the primitive Selection/Projection operators. These tests guard the
+# "eager validation at construction" invariant — schema errors must surface
+# before any SQL runs.
+
 
 class TestSchema:
+    # Schema algebra is pure Python; no engine required. These tests lock in
+    # the compatibility rules (order-insensitive), disjoint-compose contract,
+    # and eager rejection of duplicates / unsupported domains / bad names.
     def test_create_schema(self):
         s = Schema((Attribute("name", str), Attribute("age", int)))
         assert s.names() == ("name", "age")
@@ -97,6 +115,9 @@ class TestEngine:
 
 
 class TestPredicates:
+    # Exercises the Attr proxy: Python comparison/logical operators must
+    # produce Predicate nodes rather than evaluating to bool. The bool-trap
+    # test protects the `__bool__` safeguard that catches `and`/`or` misuse.
     def test_attr_eq(self, sp_data):
         s, p, sp, engine = sp_data
         pred = s.city == "London"
@@ -177,6 +198,10 @@ class TestSelectProject:
 # ===================================================================
 # Phase 2: Set Operations + Rename
 # ===================================================================
+# Union/intersect/difference require identical schemas; rename is the usual
+# tool for reaching that state. The `test_rename_then_union` case is the
+# canonical demo that these two features compose correctly.
+
 
 class TestRename:
     def test_simple_rename(self, sp_data):
@@ -246,6 +271,11 @@ class TestSetOps:
 # ===================================================================
 # Phase 3: Joins
 # ===================================================================
+# Covers the full join family: cross (disjoint schemas required),
+# natural (auto-detects common attrs), theta (explicit predicate across
+# relations), and equijoin (explicit attr pair). Name-collision and
+# no-common-attr errors are eager schema checks.
+
 
 class TestCrossProduct:
     def test_cross(self, engine):
@@ -313,6 +343,10 @@ class TestEquijoin:
 # ===================================================================
 # Phase 4: Extended Joins
 # ===================================================================
+# Semijoin / antijoin / outer join. The suppliers-and-parts dataset is
+# built so S5 has no shipments — these tests rely on that shape to
+# distinguish the three variants.
+
 
 class TestSemijoin:
     def test_semijoin(self, sp_data):
@@ -345,6 +379,10 @@ class TestOuterJoin:
 # ===================================================================
 # Phase 5: Aggregation
 # ===================================================================
+# Group-by with AggSpec (count/sum_/avg/min_/max_). Includes the
+# no-key / global aggregation case (single-row result) and verifies
+# that the output schema pairs group keys with named aggregate columns.
+
 
 class TestGrouping:
     def test_group_count(self, sp_data):
@@ -376,6 +414,12 @@ class TestGrouping:
 # ===================================================================
 # Phase 6: Division
 # ===================================================================
+# Division is the odd one out: it is the only node the compiler visits
+# twice in a single compile (dividend appears on both sides of the
+# NOT EXISTS correlation). These tests exercise both the semantic
+# "supplies ALL X" meaning and the eager schema check that the divisor
+# attrs form a subset of the dividend's.
+
 
 class TestDivision:
     def test_division_basic(self, sp_data):
@@ -405,6 +449,11 @@ class TestDivision:
 # ===================================================================
 # Phase 7: Display
 # ===================================================================
+# Renderers: algebra notation (Greek symbols), tree, explain (combined
+# multi-section view), and SQL. The SQL tests protect the parameterized-
+# query invariant — literals like "London" must appear under a `params:`
+# footer, never interpolated into the query string.
+
 
 class TestAlgebra:
     def test_select_algebra(self, sp_data):
@@ -463,6 +512,9 @@ class TestSQL:
         assert "WHERE" in sql
 
     def test_sql_params_shown(self, sp_data):
+        # Guards the parameterized-query invariant: the literal must be
+        # carried as a parameter (visible via the `params:` footer) rather
+        # than inlined into the SQL text.
         s, p, sp, engine = sp_data
         sql = s.select(s.city == "London").sql()
         assert "params:" in sql
@@ -472,6 +524,12 @@ class TestSQL:
 # ===================================================================
 # Phase 8: Polish
 # ===================================================================
+# Bag semantics (.bags() strips DISTINCT), __str__ table rendering,
+# SQL pretty-printing, and a grab-bag of edge cases. `TestBags`
+# specifically protects the set-vs-bag teaching distinction: the same
+# projection must yield fewer rows with default set semantics than
+# with .bags().
+
 
 class TestBags:
     def test_bags_preserves_duplicates(self, sp_data):
@@ -530,6 +588,10 @@ class TestSQLFormatting:
 
 
 class TestEdgeCases:
+    # Miscellaneous: .attr() escape hatch for non-identifier column names,
+    # .schema()/.count()/__iter__ convenience surface, and a larger
+    # end-to-end chained query that exercises selection + join + project
+    # together. New integration-style tests belong here.
     def test_attr_escape_hatch(self, sp_data):
         s, p, sp, engine = sp_data
         # .attr() works same as dotted access

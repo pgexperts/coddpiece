@@ -5,6 +5,14 @@ Renders expressions as:
 - Indented tree with box-drawing characters
 - Natural-language gloss
 - Composite .explain() view
+
+Contract: this module READS the expression tree (produced by relation.py) and
+NEVER mutates it. All renderers take a BaseRelation root and return a string.
+
+Coupling note: adding a new node type requires touching FOUR functions in this
+file — render_algebra(), _node_label(), _gloss_walk(), and _get_children().
+CLAUDE.md lists these as the coordinated edit points; missing any of them
+produces a fallback rendering (e.g. "<NewNode>") instead of a real one.
 """
 
 from __future__ import annotations
@@ -35,7 +43,15 @@ from .relation import (
 # ---------------------------------------------------------------------------
 
 def render_algebra(node: BaseRelation) -> str:
-    """Render an expression as standard relational algebra notation."""
+    """Render an expression as standard relational algebra notation.
+
+    Uses the classical textbook Unicode glyphs: σ (selection), π (projection),
+    ρ (rename), × (Cartesian product), ⋈ (natural/theta/equijoin),
+    ⋉ (semijoin), ▷ (antijoin), ⟕/⟖/⟗ (left/right/full outer join),
+    ∪/∩/− (union/intersect/difference), ÷ (division), γ (group-by).
+    These are the conventions students will see in database textbooks, so
+    output here should match that notation exactly.
+    """
     # Recursive isinstance dispatch. Each node type is distinct, so check
     # ordering doesn't matter. Returns Unicode algebra symbols (σ, π, ⋈, etc.).
     if isinstance(node, Relation):
@@ -104,6 +120,9 @@ def render_algebra(node: BaseRelation) -> str:
         spec = f"{keys}; {aggs}" if keys else aggs
         return f"γ({spec})({render_algebra(node.child)})"
 
+    # Fallback when a new BaseRelation subclass is added without extending
+    # this dispatch. Surfaces the bare class name so the omission is visible
+    # rather than silently producing wrong notation.
     return f"<{type(node).__name__}>"
 
 
@@ -112,7 +131,12 @@ def render_algebra(node: BaseRelation) -> str:
 # ---------------------------------------------------------------------------
 
 def render_tree(node: BaseRelation, prefix: str = "", is_last: bool = True) -> str:
-    """Render an expression as an indented tree with box-drawing characters."""
+    """Render an expression as an indented tree with box-drawing characters.
+
+    The `prefix`/`is_last` parameters exist for API symmetry with typical
+    tree-printing helpers but are not used — _tree_walk always starts with an
+    empty prefix at the root so output is left-aligned.
+    """
     lines: list[str] = []
     _tree_walk(node, lines, "", "")
     return "\n".join(lines)
@@ -145,6 +169,10 @@ def _tree_walk(
 
 
 def _node_label(node: BaseRelation) -> str:
+    # Tree/label form uses readable English (e.g. "Selection", "Project")
+    # rather than the Greek glyphs in render_algebra, because the tree view
+    # is aimed at readers who haven't yet memorized the algebra symbols.
+    # One of the four coordinated dispatch points for new node types.
     if isinstance(node, Relation):
         return node.relation_name
 
@@ -203,6 +231,11 @@ def _node_label(node: BaseRelation) -> str:
 
 
 def _get_children(node: BaseRelation) -> list[BaseRelation]:
+    # Structural walk helper shared by _tree_walk and _gloss_walk. Returning a
+    # fresh list per call keeps callers from accidentally mutating node state
+    # (the non-mutating contract for this module).
+    # One of the four coordinated dispatch points for new node types — a
+    # missing entry here makes the new node render as a leaf.
     if isinstance(node, Relation):
         return []
     if isinstance(node, (Selection, Projection, Rename, Grouping)):
@@ -219,7 +252,11 @@ def _get_children(node: BaseRelation) -> list[BaseRelation]:
 # ---------------------------------------------------------------------------
 
 def render_gloss(node: BaseRelation) -> str:
-    """Render a natural-language reading of the expression."""
+    """Render a natural-language reading of the expression.
+
+    Produces imperative prose ("Start with X. Keep only rows where ...")
+    intended to read as a step-by-step narration a student could follow.
+    """
     lines: list[str] = []
     _gloss_walk(node, lines)
     return " ".join(lines)
@@ -229,6 +266,8 @@ def _gloss_walk(node: BaseRelation, lines: list[str]) -> None:
     # Bottom-up traversal: children processed first, then the current node.
     # Relation leaves are skipped during child recursion but emit "Start with X"
     # when encountered directly, producing natural reading order.
+    # One of the four coordinated dispatch points for new node types — a new
+    # operation without a branch here simply produces no narration line.
     if isinstance(node, Relation):
         lines.append(f"Start with {node.relation_name}.")
         return
@@ -332,6 +371,10 @@ def _gloss_walk(node: BaseRelation, lines: list[str]) -> None:
 
 def render_explain(node: BaseRelation) -> str:
     """Side-by-side algebra, tree, SQL, and natural-language reading."""
+    # Deferred import: .compiler imports from here transitively in some
+    # teaching paths, and invoking compile() here is purely read-only — the
+    # compiler walks the tree to emit SQL without mutating any node, so this
+    # doesn't violate display.py's non-mutating contract.
     from .compiler import Compiler
 
     algebra = render_algebra(node)
@@ -365,7 +408,13 @@ def render_explain(node: BaseRelation) -> str:
 # ---------------------------------------------------------------------------
 
 def render_table(node: BaseRelation, max_rows: int = 50) -> str:
-    """Render a relation as a formatted ASCII table."""
+    """Render a relation as a formatted ASCII table.
+
+    This is the only renderer in this module that EXECUTES the expression
+    (via .collect()), so it touches the database. `max_rows` caps output so
+    accidentally printing a large relation in a REPL stays readable; the true
+    row count is still shown in the footer.
+    """
     schema = node._schema()
     headers = list(schema.names())
     rows = node.collect()
@@ -410,7 +459,13 @@ def render_table(node: BaseRelation, max_rows: int = 50) -> str:
 
 
 def format_sql(sql: str) -> str:
-    """Format SQL for readability with indentation."""
+    """Format SQL for readability with indentation.
+
+    Deliberately not a general-purpose SQL pretty-printer: it's tuned to the
+    shape of output that compiler.py produces (keyword-initial clauses,
+    parenthesized subqueries). Feeding arbitrary SQL through it may produce
+    odd indentation but will not corrupt the query.
+    """
     # Simple regex-based formatter. The paren-counting indenter is approximate —
     # it doesn't parse SQL, just counts ( vs ) per line. Works well enough for
     # the compiler's relatively regular output.
