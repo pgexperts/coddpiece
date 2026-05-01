@@ -14,7 +14,8 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from .errors import AttributeError_, EngineError, SchemaError
+from .aggregates import AggSpec
+from .errors import AttributeError_, DomainError, EngineError, SchemaError
 from .predicates import Attr, PredicateNode
 from .schema import Schema
 
@@ -124,7 +125,9 @@ class BaseRelation(ABC):
         """− (Difference): Tuples in self but not in other."""
         return Difference(self, other)
 
-    # Extended operations — stubs for later phases
+    # Extended operations: theta join, equijoin, and the asymmetric and
+    # outer-join family. Schema rules differ from natural join — see the
+    # individual node classes for the per-operator constraints.
     def theta_join(self, other: BaseRelation, predicate: PredicateNode) -> ThetaJoin:
         """⋈θ (Theta Join): Join with an arbitrary predicate."""
         return ThetaJoin(self, other, predicate)
@@ -149,7 +152,7 @@ class BaseRelation(ABC):
         """÷ (Division): Tuples associated with ALL tuples in other."""
         return Division(self, other)
 
-    def group(self, *keys: str, **aggs: Any) -> Grouping:
+    def group(self, *keys: str, **aggs: AggSpec) -> Grouping:
         """γ (Grouping/Aggregation): Group by keys, compute aggregates."""
         return Grouping(self, keys, aggs)
 
@@ -162,7 +165,7 @@ class BaseRelation(ABC):
     # wrapper's equivalent), which in turn asks the engine to compile and
     # execute the expression.
 
-    def collect(self) -> list[tuple]:
+    def collect(self) -> list[tuple[Any, ...]]:
         """Execute the expression and return all rows as a list of tuples."""
         return self._engine.execute(self)
 
@@ -231,19 +234,23 @@ class BagWrapper:
     def __init__(self, expr: BaseRelation):
         self._expr = expr
 
-    def collect(self) -> list[tuple]:
+    def collect(self) -> list[tuple[Any, ...]]:
+        from contextlib import closing
+
         from .compiler import Compiler
-        compiler = Compiler(self._expr._engine.dialect)
+        # bag_mode=True threads through every compile method: SELECTs lose
+        # their DISTINCT, and set operators (UNION/INTERSECT/EXCEPT) become
+        # UNION ALL / INTERSECT ALL / EXCEPT ALL. This is the difference
+        # between an honest bag-mode contrast and an illusion: SQL's bare
+        # set operators dedupe even when the per-side SELECT does not, so
+        # post-hoc string replacement on the SQL would silently re-impose
+        # set semantics at every set operator.
+        compiler = Compiler(self._expr._engine.dialect, bag_mode=True)
         sql, params = compiler.compile(self._expr)
-        # Intentionally crude string replacement. A production system would
-        # thread a bag/set flag through the compiler, but this works because
-        # the compiler always emits "SELECT DISTINCT" and never nests DISTINCT
-        # in a way that partial replacement would corrupt the query.
-        sql = sql.replace("SELECT DISTINCT ", "SELECT ")
         formatted = self._expr._engine.dialect.format_params(params)
-        cursor = self._expr._engine.connection.cursor()
-        cursor.execute(sql, formatted)
-        return cursor.fetchall()
+        with closing(self._expr._engine.connection.cursor()) as cursor:
+            cursor.execute(sql, formatted)
+            return cursor.fetchall()
 
     def __iter__(self):
         return iter(self.collect())
@@ -285,25 +292,30 @@ class Relation(BaseRelation):
     The sole LEAF type in the expression tree. Every other node in this
     module is an interior node whose engine/schema is derived from its
     children; a Relation is where that derivation bottoms out.
-    Not a frozen dataclass because the name-mangled private fields
-    (below) are explicitly mutable-at-construction-only by convention.
+
+    Not a frozen dataclass because BaseRelation declares `_engine` as a
+    property and `_schema` as a method; using a dataclass with those
+    same names as fields would shadow them. The hand-written __init__
+    sidesteps that with distinct backing-attribute names below.
     """
 
     def __init__(self, engine: Engine, table_name: str, schema: Schema):
-        # Double-underscore names trigger Python name mangling, preventing
-        # accidental override in subclasses. Only leaf Relation nodes store
-        # their own engine/schema; all expression nodes derive theirs from
-        # their children.
-        self.__engine = engine
+        # Backing fields use single-underscore "internal" naming, not the
+        # double-underscore mangling that the original code mixed
+        # inconsistently across these three slots. The names are chosen
+        # to NOT collide with `_engine` (BaseRelation property) or
+        # `_schema` (BaseRelation method); the property/method below
+        # delegate to these slots.
+        self._owning_engine = engine
         self._table_name = table_name
-        self.__schema = schema
+        self._stored_schema = schema
 
     @property
     def _engine(self) -> Engine:
-        return self.__engine
+        return self._owning_engine
 
     def _schema(self) -> Schema:
-        return self.__schema
+        return self._stored_schema
 
     @property
     def relation_name(self) -> str:
@@ -485,6 +497,7 @@ class Difference(_SetOp):
 # ---------------------------------------------------------------------------
 
 
+@dataclass(frozen=True, repr=False)
 class CrossProduct(BaseRelation):
     """× (Cross Product): Cartesian product.
 
@@ -493,12 +506,14 @@ class CrossProduct(BaseRelation):
     if there are collisions.
     """
 
-    def __init__(self, left: BaseRelation, right: BaseRelation):
-        self.left = left
-        self.right = right
-        _check_same_engine(left, right)
-        # Validate no name collisions (compose will raise if so)
-        left._schema().compose(right._schema())
+    left: BaseRelation
+    right: BaseRelation
+
+    def __post_init__(self):
+        _check_same_engine(self.left, self.right)
+        # Validate no name collisions — compose() raises SchemaError on
+        # any overlap, satisfying the eager-validation invariant.
+        self.left._schema().compose(self.right._schema())
 
     @property
     def _engine(self) -> Engine:
@@ -512,6 +527,7 @@ class CrossProduct(BaseRelation):
         return f"({self.left.relation_name} × {self.right.relation_name})"
 
 
+@dataclass(frozen=True, repr=False)
 class NaturalJoin(BaseRelation):
     """⋈ (Natural Join): Join on common attributes.
 
@@ -519,20 +535,21 @@ class NaturalJoin(BaseRelation):
     attributes appear once in the output, not twice.
     """
 
-    def __init__(self, left: BaseRelation, right: BaseRelation):
-        self.left = left
-        self.right = right
-        _check_same_engine(left, right)
-        common = left._schema().common(right._schema())
+    left: BaseRelation
+    right: BaseRelation
+
+    def __post_init__(self):
+        _check_same_engine(self.left, self.right)
+        common = self.left._schema().common(self.right._schema())
         # Guardrail: a natural join with no common attributes silently becomes
         # a cross product, which is almost certainly a mistake. We force the
         # user to be explicit by using equijoin or rename instead.
         if len(common) == 0:
             raise SchemaError(
-                f"NATURAL JOIN between {left.relation_name!r} and "
-                f"{right.relation_name!r} found no common attributes.\n\n"
-                f"  Left:  {left._schema()}\n"
-                f"  Right: {right._schema()}\n\n"
+                f"NATURAL JOIN between {self.left.relation_name!r} and "
+                f"{self.right.relation_name!r} found no common attributes.\n\n"
+                f"  Left:  {self.left._schema()}\n"
+                f"  Right: {self.right._schema()}\n\n"
                 f"  Hint: Use EQUIJOIN to specify the join condition explicitly:\n"
                 f"    left.equijoin(right, 'left_attr', 'right_attr')\n"
                 f"  Or RENAME to align attribute names first."
@@ -550,6 +567,7 @@ class NaturalJoin(BaseRelation):
         return f"({self.left.relation_name} ⋈ {self.right.relation_name})"
 
 
+@dataclass(frozen=True, repr=False)
 class ThetaJoin(BaseRelation):
     """⋈θ (Theta Join): Join with an arbitrary predicate.
 
@@ -559,13 +577,14 @@ class ThetaJoin(BaseRelation):
     Attr proxy already validated each side when it was built.
     """
 
-    def __init__(self, left: BaseRelation, right: BaseRelation, predicate: PredicateNode):
-        self.left = left
-        self.right = right
-        self.predicate = predicate
-        _check_same_engine(left, right)
-        # Schema is full compose (must have disjoint names)
-        left._schema().compose(right._schema())
+    left: BaseRelation
+    right: BaseRelation
+    predicate: PredicateNode
+
+    def __post_init__(self):
+        _check_same_engine(self.left, self.right)
+        # Schema is full compose (must have disjoint names).
+        self.left._schema().compose(self.right._schema())
 
     @property
     def _engine(self) -> Engine:
@@ -579,6 +598,7 @@ class ThetaJoin(BaseRelation):
         return f"({self.left.relation_name} ⋈θ {self.right.relation_name})"
 
 
+@dataclass(frozen=True, repr=False)
 class Equijoin(BaseRelation):
     """⋈= (Equijoin): Join where left_attr = right_attr.
 
@@ -588,23 +608,22 @@ class Equijoin(BaseRelation):
     output so the result has no redundant column.
     """
 
-    def __init__(self, left: BaseRelation, right: BaseRelation,
-                 left_attr: str, right_attr: str):
-        self.left = left
-        self.right = right
-        self.left_attr = left_attr
-        self.right_attr = right_attr
-        _check_same_engine(left, right)
-        # Validate attributes exist
-        if left_attr not in left._schema():
+    left: BaseRelation
+    right: BaseRelation
+    left_attr: str
+    right_attr: str
+
+    def __post_init__(self):
+        _check_same_engine(self.left, self.right)
+        if self.left_attr not in self.left._schema():
             raise AttributeError_(
-                f"Left relation has no attribute {left_attr!r}. "
-                f"Available: {', '.join(left._schema().names())}"
+                f"Left relation has no attribute {self.left_attr!r}. "
+                f"Available: {', '.join(self.left._schema().names())}"
             )
-        if right_attr not in right._schema():
+        if self.right_attr not in self.right._schema():
             raise AttributeError_(
-                f"Right relation has no attribute {right_attr!r}. "
-                f"Available: {', '.join(right._schema().names())}"
+                f"Right relation has no attribute {self.right_attr!r}. "
+                f"Available: {', '.join(self.right._schema().names())}"
             )
 
     @property
@@ -615,7 +634,6 @@ class Equijoin(BaseRelation):
         # Unlike cross product, equijoin drops the duplicate join column from
         # the right side (since left_attr = right_attr, keeping both is
         # redundant). Then we check for remaining name collisions.
-        from .schema import Attribute
         left_s = self.left._schema()
         right_s = self.right._schema()
         right_attrs = tuple(
@@ -640,6 +658,7 @@ class Equijoin(BaseRelation):
 # ---------------------------------------------------------------------------
 
 
+@dataclass(frozen=True, repr=False)
 class Semijoin(BaseRelation):
     """⋉ (Semijoin): Left tuples that have a match in right.
 
@@ -648,15 +667,17 @@ class Semijoin(BaseRelation):
     semijoin with no join condition would be degenerate.
     """
 
-    def __init__(self, left: BaseRelation, right: BaseRelation):
-        self.left = left
-        self.right = right
-        _check_same_engine(left, right)
-        common = left._schema().common(right._schema())
+    left: BaseRelation
+    right: BaseRelation
+
+    def __post_init__(self):
+        _check_same_engine(self.left, self.right)
+        common = self.left._schema().common(self.right._schema())
         if len(common) == 0:
             raise SchemaError(
                 f"SEMIJOIN requires common attributes. "
-                f"None found between {left.relation_name!r} and {right.relation_name!r}."
+                f"None found between {self.left.relation_name!r} "
+                f"and {self.right.relation_name!r}."
             )
 
     @property
@@ -671,6 +692,7 @@ class Semijoin(BaseRelation):
         return f"({self.left.relation_name} ⋉ {self.right.relation_name})"
 
 
+@dataclass(frozen=True, repr=False)
 class Antijoin(BaseRelation):
     """▷ (Antijoin): Left tuples with NO match in right.
 
@@ -679,15 +701,17 @@ class Antijoin(BaseRelation):
     WHERE NULL so NULLs in the right side don't produce false matches.
     """
 
-    def __init__(self, left: BaseRelation, right: BaseRelation):
-        self.left = left
-        self.right = right
-        _check_same_engine(left, right)
-        common = left._schema().common(right._schema())
+    left: BaseRelation
+    right: BaseRelation
+
+    def __post_init__(self):
+        _check_same_engine(self.left, self.right)
+        common = self.left._schema().common(self.right._schema())
         if len(common) == 0:
             raise SchemaError(
                 f"ANTIJOIN requires common attributes. "
-                f"None found between {left.relation_name!r} and {right.relation_name!r}."
+                f"None found between {self.left.relation_name!r} "
+                f"and {self.right.relation_name!r}."
             )
 
     @property
@@ -702,28 +726,37 @@ class Antijoin(BaseRelation):
         return f"({self.left.relation_name} ▷ {self.right.relation_name})"
 
 
+@dataclass(frozen=True, repr=False)
 class OuterJoin(BaseRelation):
     """⟕⟖⟗ (Outer Join): Join preserving unmatched tuples.
 
     `how` is validated against VALID_HOW at construction to catch typos
     before execution. Only three directions are meaningful; we validate
     explicitly rather than trusting the DB to reject bad SQL later.
+
+    VALID_HOW is a class-level constant (no annotation), so dataclass
+    leaves it alone — only the annotated `left`, `right`, `how` slots
+    become dataclass fields.
     """
 
     VALID_HOW = ("left", "right", "full")
 
-    def __init__(self, left: BaseRelation, right: BaseRelation, how: str = "full"):
-        if how not in self.VALID_HOW:
-            raise ValueError(f"'how' must be one of {self.VALID_HOW}, got {how!r}")
-        self.left = left
-        self.right = right
-        self.how = how
-        _check_same_engine(left, right)
-        common = left._schema().common(right._schema())
+    left: BaseRelation
+    right: BaseRelation
+    how: str = "full"
+
+    def __post_init__(self):
+        if self.how not in self.VALID_HOW:
+            raise ValueError(
+                f"'how' must be one of {self.VALID_HOW}, got {self.how!r}"
+            )
+        _check_same_engine(self.left, self.right)
+        common = self.left._schema().common(self.right._schema())
         if len(common) == 0:
             raise SchemaError(
                 f"OUTER JOIN requires common attributes. "
-                f"None found between {left.relation_name!r} and {right.relation_name!r}."
+                f"None found between {self.left.relation_name!r} "
+                f"and {self.right.relation_name!r}."
             )
 
     @property
@@ -744,6 +777,7 @@ class OuterJoin(BaseRelation):
 # ---------------------------------------------------------------------------
 
 
+@dataclass(frozen=True, repr=False)
 class Grouping(BaseRelation):
     """γ (Grouping/Aggregation).
 
@@ -753,13 +787,17 @@ class Grouping(BaseRelation):
     Validated eagerly: unknown group keys fail at construction.
     """
 
-    def __init__(self, child: BaseRelation, keys: tuple[str, ...], aggs: dict[str, Any]):
-        self.child = child
-        self.keys = keys
-        self.aggs = aggs
-        # Validate keys exist
-        schema = child._schema()
-        for k in keys:
+    child: BaseRelation
+    keys: tuple[str, ...]
+    aggs: dict[str, AggSpec]
+
+    def __post_init__(self):
+        # Validate group keys exist on the child schema. This is the
+        # earliest point we can catch typos like .group("snO", ...) — the
+        # alternative would be a SQL error at .collect() time, far from
+        # the offending source line.
+        schema = self.child._schema()
+        for k in self.keys:
             if k not in schema:
                 raise AttributeError_(
                     f"Grouping key {k!r} not in schema. "
@@ -793,6 +831,7 @@ class Grouping(BaseRelation):
 # ---------------------------------------------------------------------------
 
 
+@dataclass(frozen=True, repr=False)
 class Division(BaseRelation):
     """÷ (Division): Tuples associated with ALL tuples in the divisor.
 
@@ -808,20 +847,20 @@ class Division(BaseRelation):
         leave a zero-attribute result schema, which is meaningless.
     """
 
-    def __init__(self, left: BaseRelation, right: BaseRelation):
-        self.left = left
-        self.right = right
-        _check_same_engine(left, right)
-        # Right schema attrs must be a subset of left schema attrs
-        left_names = set(left._schema().names())
-        right_names = set(right._schema().names())
+    left: BaseRelation
+    right: BaseRelation
+
+    def __post_init__(self):
+        _check_same_engine(self.left, self.right)
+        left_names = set(self.left._schema().names())
+        right_names = set(self.right._schema().names())
         # Divisor attributes must be a strict subset of dividend attributes.
         if not right_names.issubset(left_names):
             raise SchemaError(
                 f"DIVISION requires the divisor's attributes to be a subset "
                 f"of the dividend's attributes.\n\n"
-                f"  Dividend: {left._schema()}\n"
-                f"  Divisor:  {right._schema()}\n"
+                f"  Dividend: {self.left._schema()}\n"
+                f"  Divisor:  {self.right._schema()}\n"
                 f"  Not in dividend: {right_names - left_names}"
             )
         # Equal attribute sets would produce an empty result schema, which is
@@ -829,8 +868,29 @@ class Division(BaseRelation):
         if right_names == left_names:
             raise SchemaError(
                 f"DIVISION requires the divisor to have strictly fewer attributes "
-                f"than the dividend. Both have: {left._schema()}"
+                f"than the dividend. Both have: {self.left._schema()}"
             )
+        # Shared-attribute domains must match — same rule Schema.common
+        # enforces for natural join. Without this, the inner EXCEPT inside
+        # the compiled NOT EXISTS would compare values across different
+        # types (e.g. str vs int), which most backends silently coerce in
+        # surprising ways. Validating here keeps the error close to the
+        # offending construction site, matching the eager-validation
+        # invariant in CLAUDE.md.
+        left_schema = self.left._schema()
+        right_schema = self.right._schema()
+        for name in right_schema.names():
+            ldom = left_schema[name].domain
+            rdom = right_schema[name].domain
+            if ldom != rdom:
+                raise DomainError(
+                    f"DIVISION requires matching domains for shared attributes.\n\n"
+                    f"  Dividend: {left_schema}\n"
+                    f"  Divisor:  {right_schema}\n"
+                    f"  Mismatch on {name!r}: "
+                    f"{ldom.__name__} (dividend) vs {rdom.__name__} (divisor).\n\n"
+                    f"  Hint: Use RENAME or PROJECT to align types before DIVIDE."
+                )
 
     @property
     def _engine(self) -> Engine:

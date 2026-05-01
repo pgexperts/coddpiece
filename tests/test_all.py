@@ -10,13 +10,18 @@ the phase whose invariants they exercise.
 """
 
 import pytest
+
 from coddpiece import (
-    Engine, Schema, Attribute, count, sum_, avg, min_, max_,
-    SchemaError, DomainError, PredicateError,
+    Attribute,
+    DomainError,
+    PredicateError,
+    Schema,
+    SchemaError,
+    count,
+    sum_,
 )
 from coddpiece.errors import AttributeError_
-from coddpiece.predicates import Attr, Predicate
-
+from coddpiece.predicates import Predicate
 
 # ===================================================================
 # Phase 1: Foundation
@@ -142,7 +147,9 @@ class TestPredicates:
     def test_bool_trap(self, sp_data):
         s, p, sp, engine = sp_data
         with pytest.raises(PredicateError, match="Use '&'"):
-            (s.city == "London") and (s.status > 10)
+            # The "useless expression" is the entire point: `and` triggers
+            # __bool__ on the left Predicate, which is the trap under test.
+            (s.city == "London") and (s.status > 10)  # noqa: B018
 
 
 class TestSelection:
@@ -635,3 +642,238 @@ class TestEdgeCases:
         explanation = expr.explain()
         assert "ALL" in explanation
         assert "NOT EXISTS" in explanation
+
+
+# ===================================================================
+# Regressions
+# ===================================================================
+# Each test below pins a bug surfaced by code review. The shared discipline
+# is to assert behavior the original code *almost* got right — column order
+# matched the schema for the common test data but desynced for the general
+# case; hasattr appeared to work but propagated the wrong exception type;
+# Division compiled fine on SQLite but produced unportable SQL. Failing
+# regressions here are the canary that the corresponding invariants have
+# slipped again.
+
+
+class TestNaturalJoinColumnOrder:
+    # The original compiler emitted (common + left_only + right_only),
+    # but Schema.join_compose returns left.attributes + right_only — which
+    # preserves the common attribute's left-side position. Test data with
+    # the common attribute NOT first on the left would expose the desync.
+    def test_common_not_first_in_left(self, engine):
+        a = engine.create(
+            "njco_a",
+            {"x": int, "sno": int, "y": int},
+            rows=[(10, 1, 100), (20, 2, 200)],
+        )
+        b = engine.create(
+            "njco_b",
+            {"sno": int, "z": int},
+            rows=[(1, 42), (2, 99)],
+        )
+        result = a.join(b)
+        # Schema order: left attrs (x, sno, y) then right_only (z).
+        assert result.schema().names() == ("x", "sno", "y", "z")
+        rows = sorted(result.collect())
+        # Column values must line up with schema order. Pre-fix this would
+        # have come out as (sno, x, y, z) i.e. (1, 10, 100, 42).
+        assert rows == [(10, 1, 100, 42), (20, 2, 200, 99)]
+
+
+class TestOuterJoinColumnOrder:
+    # Same column-order invariant as natural join, plus COALESCE for common
+    # attrs. Tests cover all three directions; the previous suite only
+    # exercised "left" with the suppliers-and-parts shape that happened to
+    # have the common attribute first on the left.
+    def test_left_outer_common_not_first(self, engine):
+        a = engine.create(
+            "ojco_a_l",
+            {"x": int, "sno": int},
+            rows=[(10, 1), (20, 2)],
+        )
+        b = engine.create(
+            "ojco_b_l",
+            {"sno": int, "z": int},
+            rows=[(1, 42)],
+        )
+        result = a.outer_join(b, how="left")
+        assert result.schema().names() == ("x", "sno", "z")
+        rows = sorted(result.collect(), key=lambda r: r[0])
+        assert rows[0] == (10, 1, 42)
+        # Unmatched left row preserved; right-only column is NULL.
+        assert rows[1][:2] == (20, 2) and rows[1][2] is None
+
+    def test_right_outer_common_not_first(self, engine):
+        # Right-outer preserves the RIGHT operand, so the unmatched row
+        # belongs on b (the right side here). `a` is left so its schema
+        # determines column order: (x, sno) followed by right_only (z).
+        a = engine.create(
+            "ojco_a_r",
+            {"x": int, "sno": int},
+            rows=[(10, 1)],
+        )
+        b = engine.create(
+            "ojco_b_r",
+            {"sno": int, "z": int},
+            rows=[(1, 42), (2, 99)],
+        )
+        result = a.outer_join(b, how="right")
+        assert result.schema().names() == ("x", "sno", "z")
+        rows = sorted(result.collect(), key=lambda r: r[1])  # sort by sno
+        # sno=1 matches both sides; sno=2 is right-only so left columns NULL.
+        assert rows[0] == (10, 1, 42)
+        assert rows[1][1:] == (2, 99) and rows[1][0] is None
+
+    def test_full_outer_common_not_first(self, engine):
+        a = engine.create(
+            "ojco_a_f",
+            {"x": int, "sno": int},
+            rows=[(10, 1), (20, 2)],
+        )
+        b = engine.create(
+            "ojco_b_f",
+            {"sno": int, "z": int},
+            rows=[(1, 42), (3, 77)],
+        )
+        result = a.outer_join(b, how="full")
+        assert result.schema().names() == ("x", "sno", "z")
+        rows = result.collect()
+        # COALESCE on the common attribute must produce the matched value
+        # for the joined row and the present side's value otherwise.
+        snos_in_result = {r[1] for r in rows}
+        assert snos_in_result == {1, 2, 3}
+
+
+class TestAttributeErrorBuiltinProtocol:
+    # AttributeError_ now multi-inherits from the builtin AttributeError so
+    # hasattr / 3-arg getattr behave correctly. Without that, both leak the
+    # custom exception out and break @cached_property and IDE introspection.
+    def test_hasattr_returns_false_for_missing(self, sp_data):
+        s, _p, _sp, _engine = sp_data
+        assert hasattr(s, "sno") is True
+        assert hasattr(s, "definitely_not_a_column") is False
+
+    def test_getattr_default_returns_for_missing(self, sp_data):
+        s, _p, _sp, _engine = sp_data
+        sentinel = object()
+        assert getattr(s, "definitely_not_a_column", sentinel) is sentinel
+
+
+class TestDivisionDomainCheck:
+    # Subset-by-name was previously sufficient. With names matching but
+    # domains differing, the compiled EXCEPT compares mixed types — broken
+    # in subtle, backend-dependent ways. Now caught at construction.
+    def test_rejects_domain_mismatch(self, engine):
+        dividend = engine.create(
+            "divd_dom_a",
+            {"sno": str, "pno": str},
+            rows=[("S1", "P1")],
+        )
+        divisor = engine.create(
+            "divd_dom_b",
+            {"pno": int},
+            rows=[(1,)],
+        )
+        with pytest.raises(DomainError, match="domains"):
+            dividend.divide(divisor)
+
+
+class TestDivisionSQLAlias:
+    # The original division SQL had `FROM ({right_sql})` with no alias.
+    # SQLite tolerated it; PostgreSQL rejects with "subquery in FROM must
+    # have an alias." We can't run a Postgres test from this suite, but
+    # we can pin the SQL shape so the alias doesn't regress.
+    def test_emits_alias_on_inner_divisor_subquery(self, sp_data):
+        s, p, sp, engine = sp_data
+        red_parts = p.select(p.color == "Red").project("pno")
+        expr = sp.project("sno", "pno").divide(red_parts)
+        sql = expr.sql()
+        # Compiler aliases derived tables with t1, t2, ... — the inner
+        # divisor subquery used to lack any alias before this fix. Match
+        # any "AS tN" attached to a parenthesized SELECT to avoid coupling
+        # the test to specific alias numbering.
+        import re
+        # Strip the "-- params: ..." footer the .sql() helper appends so it
+        # doesn't confuse the regex.
+        sql_only = sql.split("-- params:")[0]
+        assert re.search(r"\)\s+AS\s+t\d+", sql_only), (
+            f"Expected an aliased derived table inside division SQL, got:\n{sql}"
+        )
+
+
+class TestEngineRelationValidation:
+    # Engine.relation() is the public entry point for wrapping an existing
+    # table. Pre-fix it interpolated the table name straight into a PRAGMA
+    # statement, which is both an injection vector and a quoting bug for
+    # reserved-word table names. The validation gate is now the same
+    # invariant Attribute already enforces on column names.
+    def test_rejects_non_identifier_table_name(self, engine):
+        with pytest.raises(ValueError, match="identifier"):
+            engine.relation('users"); DROP TABLE foo; --')
+
+    def test_accepts_reserved_word_table_via_quoting(self, engine):
+        # "order" is a Python identifier (passes isidentifier()) but a
+        # SQL reserved word; the dialect's quote_identifier handles that.
+        engine.create(
+            "order",
+            {"id": int, "qty": int},
+            rows=[(1, 10), (2, 20)],
+        )
+        wrapped = engine.relation("order")
+        assert wrapped.schema().names() == ("id", "qty")
+        assert wrapped.count() == 2
+
+
+class TestBagsOverSetOps:
+    # Pre-fix, BagWrapper used a textual replace of "SELECT DISTINCT ".
+    # That stripped the per-side DISTINCT but left bare UNION/INTERSECT/EXCEPT,
+    # which are themselves set operators in SQL — so .bags() over a set
+    # operation silently produced set semantics. Threading bag_mode through
+    # the compiler turns those into UNION ALL / INTERSECT ALL / EXCEPT ALL,
+    # so duplicates actually survive the round-trip now.
+    def test_bags_over_union_preserves_duplicates(self, engine):
+        a = engine.create("bsu_a", {"x": int}, rows=[(1,), (2,)])
+        b = engine.create("bsu_b", {"x": int}, rows=[(2,), (3,)])
+        # Set: 3 rows {1, 2, 3}. Bag: 4 rows [1, 2, 2, 3].
+        assert sorted(r[0] for r in a.union(b).collect()) == [1, 2, 3]
+        assert sorted(r[0] for r in a.union(b).bags().collect()) == [1, 2, 2, 3]
+
+    def test_bags_over_intersect_raises_on_sqlite(self, engine):
+        # INTERSECT ALL is part of the SQL standard but SQLite doesn't
+        # implement it. We surface that as NotImplementedError at compile
+        # time rather than letting the driver emit "syntax error near ALL".
+        a = engine.create("bsi_a", {"x": int}, rows=[(1,), (1,), (2,)])
+        b = engine.create("bsi_b", {"x": int}, rows=[(1,), (1,), (1,), (2,)])
+        # Set semantics still works.
+        assert sorted(r[0] for r in a.intersect(b).collect()) == [1, 2]
+        # Bag mode raises with the dialect-specific guidance.
+        with pytest.raises(NotImplementedError, match="INTERSECT ALL"):
+            a.intersect(b).bags().collect()
+
+    def test_bags_over_difference_raises_on_sqlite(self, engine):
+        # Same story for EXCEPT ALL.
+        a = engine.create("bsd_a", {"x": int}, rows=[(1,), (1,), (1,), (2,)])
+        b = engine.create("bsd_b", {"x": int}, rows=[(1,)])
+        assert sorted(r[0] for r in a.difference(b).collect()) == [2]
+        with pytest.raises(NotImplementedError, match="EXCEPT ALL"):
+            a.difference(b).bags().collect()
+
+
+class TestSQLTypePrefixMatch:
+    # INTERVAL starts with the literal SQL type "INT", and the previous
+    # prefix-matcher returned the int mapping for it. The boundary check
+    # blocks that while still letting parametric types like VARCHAR(255)
+    # and the canonical INTEGER/INT spellings resolve correctly.
+    def test_interval_does_not_match_int(self, engine):
+        from datetime import datetime
+        assert engine._sql_type_to_python("INTERVAL") is str
+        # An unknown type still falls back to str, by design.
+        assert engine._sql_type_to_python("ENUM") is str
+        # Sanity: parametric and bare integer spellings still work.
+        assert engine._sql_type_to_python("VARCHAR(255)") is str
+        assert engine._sql_type_to_python("INTEGER") is int
+        assert engine._sql_type_to_python("INT") is int
+        assert engine._sql_type_to_python("INT(11)") is int
+        # And a real timestamp type still resolves.
+        assert engine._sql_type_to_python("TIMESTAMP") is datetime

@@ -17,11 +17,12 @@ placeholder() / format_params() pair is the one-and-only mechanism.
 from __future__ import annotations
 
 import importlib
+from contextlib import closing
 from typing import Any
 
 from .compiler import Compiler
-from .schema import SUPPORTED_DOMAINS, SQL_TO_PYTHON, Attribute, Schema
 from .relation import BaseRelation, Relation
+from .schema import SQL_TO_PYTHON, SUPPORTED_DOMAINS, Attribute, Schema
 
 
 class Dialect:
@@ -42,24 +43,47 @@ class Dialect:
         self._connection = connection
         self.paramstyle = self._detect_paramstyle(connection)
         self.quote_char = self._detect_quote_char(connection)
+        # Which set operators support the `... ALL` (bag/multiset) form.
+        # UNION ALL is universally supported by SQL backends. INTERSECT ALL
+        # and EXCEPT ALL are part of the SQL standard but SQLite has never
+        # implemented them. PostgreSQL and MySQL 8+ do. Reporting this per
+        # dialect lets BagWrapper raise a clear error on backends that
+        # cannot honor bag semantics for INTERSECT/EXCEPT, instead of
+        # confusing users with a driver-level "syntax error near ALL".
+        self.setop_all_support = self._detect_setop_all_support(connection)
+
+    def _detect_setop_all_support(self, connection: Any) -> frozenset[str]:
+        """Return the set of set ops for which `<OP> ALL` is supported."""
+        module_name = type(connection).__module__
+        # SQLite: only UNION ALL.
+        if "sqlite" in module_name:
+            return frozenset({"UNION"})
+        # Everywhere else (PG, MySQL 8+, MSSQL, ...): assume full support.
+        # If a future backend disagrees, add a branch here rather than
+        # hiding the limitation behind a runtime SQL error.
+        return frozenset({"UNION", "INTERSECT", "EXCEPT"})
 
     def _detect_paramstyle(self, connection: Any) -> str:
         """Detect the parameter style from the connection's module."""
         # Walk up the module hierarchy (e.g., psycopg2.extensions → psycopg2)
         # because paramstyle is typically on the top-level module, but the
         # connection class may live in a submodule. Falls back to qmark (SQLite).
+        #
+        # Only ImportError is swallowed: a missing intermediate package is
+        # expected during the walk. Anything else (a driver whose import
+        # raises a real error, or a module whose __getattr__ misbehaves)
+        # propagates so the user gets a meaningful failure instead of
+        # silently defaulting to qmark and emitting unbindable SQL on
+        # PostgreSQL/MySQL drivers.
         module_name = type(connection).__module__
-        try:
-            parts = module_name.split(".")
-            for i in range(len(parts), 0, -1):
-                try:
-                    mod = importlib.import_module(".".join(parts[:i]))
-                    if hasattr(mod, "paramstyle"):
-                        return mod.paramstyle
-                except ImportError:
-                    continue
-        except Exception:
-            pass
+        parts = module_name.split(".")
+        for i in range(len(parts), 0, -1):
+            try:
+                mod = importlib.import_module(".".join(parts[:i]))
+            except ImportError:
+                continue
+            if hasattr(mod, "paramstyle"):
+                return mod.paramstyle
         # Default to qmark (SQLite style)
         return "qmark"
 
@@ -170,7 +194,7 @@ class Engine:
             self._insert_rows(name, schema, rows)
         return self.relation(name)
 
-    def execute(self, expr: BaseRelation) -> list[tuple]:
+    def execute(self, expr: BaseRelation) -> list[tuple[Any, ...]]:
         """Compile an expression to SQL and execute it."""
         # Always re-compile: expression trees are immutable but users may
         # mutate the database between calls, so caching would not help.
@@ -179,9 +203,14 @@ class Engine:
         compiler = Compiler(self.dialect)
         sql, params = compiler.compile(expr)
         formatted_params = self.dialect.format_params(params)
-        cursor = self.connection.cursor()
-        cursor.execute(sql, formatted_params)
-        return cursor.fetchall()
+        # contextlib.closing ensures the cursor is released even if the
+        # driver raises during execute or fetchall. PEP 249 requires every
+        # cursor to expose .close(); not every driver makes cursors usable
+        # as native context managers (sqlite3 doesn't), so we route through
+        # closing() for portability rather than using `with cursor as ...`.
+        with closing(self.connection.cursor()) as cursor:
+            cursor.execute(sql, formatted_params)
+            return cursor.fetchall()
 
     # --- Internal helpers ---
 
@@ -197,17 +226,36 @@ class Engine:
         # Three-tier fallback: SQLite PRAGMA → PostgreSQL information_schema
         # → generic cursor.description. The generic path loses type info
         # (defaults to str) because cursor.description type_code is backend-specific.
-        cursor = self.connection.cursor()
+        # All three branches share `with closing(...)` so the cursor is
+        # released even if the introspection raises (matters for PG/MySQL
+        # under load; SQLite in-memory does not care).
         module_name = type(self.connection).__module__
 
         # SQLite: use PRAGMA
-        # PRAGMA does not accept parameterized arguments, hence the
-        # f-string. This is the only place in the module where a table
-        # identifier is interpolated directly; callers are trusted here
-        # (introspection is driven by code-supplied names, not user input).
+        # PRAGMA arguments cannot be parameterized via the driver, so the
+        # table name is interpolated. Two layers of safety:
+        #   1. isidentifier() rejects anything that wouldn't be a legal
+        #      Python identifier, matching the same invariant Attribute
+        #      already enforces on column names. This keeps adversarial or
+        #      structurally-odd inputs (embedded quotes, semicolons, dots)
+        #      out of the SQL text entirely.
+        #   2. PRAGMA also accepts a quoted-identifier form, so we route
+        #      the validated name through the dialect's quote_identifier
+        #      to handle reserved words like "order" or "select" that
+        #      pass isidentifier() but are not safe unquoted.
+        # `Engine.relation()` is a public entry point — it cannot assume
+        # callers are trusted, so this gate must hold even for wrapping
+        # an existing table.
         if "sqlite" in module_name:
-            cursor.execute(f"PRAGMA table_info({table_name})")
-            rows = cursor.fetchall()
+            if not isinstance(table_name, str) or not table_name.isidentifier():
+                raise ValueError(
+                    f"Invalid table name {table_name!r}: "
+                    f"must be a valid Python identifier."
+                )
+            qname = self.dialect.quote_identifier(table_name)
+            with closing(self.connection.cursor()) as cursor:
+                cursor.execute(f"PRAGMA table_info({qname})")
+                rows = cursor.fetchall()
             if not rows:
                 raise ValueError(f"Table {table_name!r} not found.")
             attrs = []
@@ -219,19 +267,29 @@ class Engine:
                 attrs.append(Attribute(col_name, py_type))
             return Schema(tuple(attrs))
 
-        # PostgreSQL (psycopg2, psycopg3, pg8000): use information_schema
-        # Hard-coded %s placeholder: every supported PG driver uses
-        # 'format' paramstyle, so we bypass the Dialect here. If a PG
-        # driver ever appears that uses a different paramstyle, this
-        # branch must be rewritten to go through self.dialect.placeholder().
+        # PostgreSQL (psycopg2, psycopg3, pg8000): use information_schema.
+        #
+        # CAVEAT: this is the one place outside Dialect where a paramstyle
+        # is hardcoded. The earlier comment claimed every supported PG
+        # driver uses 'format' paramstyle — that was wrong. psycopg3 (and
+        # psycopg2) report 'pyformat' (`%(name)s`); only pg8000 uses
+        # 'format' (`%s`). The bare %s below works because psycopg accepts
+        # both shapes at execute time as a forgiveness behavior, and pg8000
+        # native-supports it. We rely on that tolerance rather than route
+        # through self.dialect.placeholder() / format_params() for one
+        # query. If a future PG driver appears that strictly enforces its
+        # declared paramstyle (refusing %s under pyformat), rewrite this
+        # branch to use the Dialect like the rest of the compiler does.
+        # Treat this as a known minor inconsistency, not a precedent.
         if any(x in module_name for x in ("psycopg", "pg8000", "postgresql")):
-            cursor.execute(
-                "SELECT column_name, data_type "
-                "FROM information_schema.columns "
-                "WHERE table_name = %s ORDER BY ordinal_position",
-                (table_name,),
-            )
-            rows = cursor.fetchall()
+            with closing(self.connection.cursor()) as cursor:
+                cursor.execute(
+                    "SELECT column_name, data_type "
+                    "FROM information_schema.columns "
+                    "WHERE table_name = %s ORDER BY ordinal_position",
+                    (table_name,),
+                )
+                rows = cursor.fetchall()
             if not rows:
                 raise ValueError(f"Table {table_name!r} not found.")
             attrs = []
@@ -240,13 +298,27 @@ class Engine:
                 attrs.append(Attribute(col_name, py_type))
             return Schema(tuple(attrs))
 
-        # Fallback: SELECT * LIMIT 0 + cursor.description
+        # Fallback: SELECT * LIMIT 0 + cursor.description.
+        #
+        # PEP 249 guarantees that every conforming driver exposes
+        # connection.Error as the root of its exception hierarchy. We
+        # narrow the catch to that family so an unrelated bug elsewhere
+        # in the call stack still propagates with its original traceback.
+        # Translation to ValueError keeps the user-facing API uniform with
+        # the SQLite and Postgres branches above (they raise ValueError on
+        # "table not found").
         q = self.dialect.quote_identifier(table_name)
-        cursor.execute(f"SELECT * FROM {q} LIMIT 0")
-        if cursor.description is None:
-            raise ValueError(f"Table {table_name!r} not found or has no columns.")
+        with closing(self.connection.cursor()) as cursor:
+            try:
+                cursor.execute(f"SELECT * FROM {q} LIMIT 0")
+            except getattr(self.connection, "Error", Exception) as exc:
+                raise ValueError(f"Table {table_name!r} not found.") from exc
+            # PEP 249 says cursor.description is None only for statements
+            # that produced no result set (DDL, etc.); a successful SELECT
+            # always populates it. The check is defensive, not load-bearing.
+            description = cursor.description or ()
         attrs = []
-        for desc in cursor.description:
+        for desc in description:
             col_name = desc[0]
             # cursor.description type_code is backend-specific; default to str
             attrs.append(Attribute(col_name, str))
@@ -254,14 +326,23 @@ class Engine:
 
     def _sql_type_to_python(self, sql_type: str) -> type:
         """Map a SQL type string to a Python type."""
-        # Exact match first, then prefix match for parameterized types like
-        # VARCHAR(255). Falls back to str for unknown types — lenient by design
-        # to maximize backend compatibility.
+        # Exact match first, then bounded prefix match for parameterized types
+        # like VARCHAR(255). The prefix must end at a non-identifier boundary
+        # so spurious matches like INTERVAL → "INT" → int don't slip through.
+        # `INT(11)` (MySQL) and `INTEGER` (SQLite/PG) still match correctly
+        # because the boundary character ('(' or end-of-string) is not part of
+        # an identifier. Falls back to str for unknown types — lenient by
+        # design to maximize backend compatibility.
         sql_type = sql_type.upper().strip()
         if sql_type in SQL_TO_PYTHON:
             return SQL_TO_PYTHON[sql_type]
         for sql_key, py_type in SQL_TO_PYTHON.items():
             if sql_type.startswith(sql_key):
+                rest = sql_type[len(sql_key):]
+                # Identifier-character continuation means this is a different
+                # type that happens to share a prefix — reject the match.
+                if rest and (rest[0].isalnum() or rest[0] == "_"):
+                    continue
                 return py_type
         return str
 
@@ -278,8 +359,8 @@ class Engine:
             cols.append(f"{col_name} {sql_type}")
         col_defs = ", ".join(cols)
         table = self.dialect.quote_identifier(name)
-        cursor = self.connection.cursor()
-        cursor.execute(f"CREATE TABLE {table} ({col_defs})")
+        with closing(self.connection.cursor()) as cursor:
+            cursor.execute(f"CREATE TABLE {table} ({col_defs})")
         self.connection.commit()
 
     def _insert_rows(self, name: str, schema: Schema, rows: list[tuple]) -> None:
@@ -289,15 +370,24 @@ class Engine:
         # executemany() to keep error messages referencing individual
         # bad rows — this is a teaching library, so clarity beats bulk
         # throughput.
+        #
+        # Pedagogical aside for readers studying this code: in real
+        # application code, prefer cursor.executemany() for inserting many
+        # rows. It is dramatically faster (one round-trip per batch on PG
+        # or MySQL instead of one per row) and most drivers still surface
+        # per-row constraint errors. The per-row pattern here is chosen for
+        # readability, not as a recommended template.
         if not rows:
             return
         table = self.dialect.quote_identifier(name)
         n_cols = len(schema)
         placeholders = ", ".join(self.dialect.placeholder(i) for i in range(n_cols))
-        cursor = self.connection.cursor()
-        # format_params on each row is necessary because named paramstyles need
-        # a dict, not a list. Commits once after all rows, not per row.
-        for row in rows:
-            formatted = self.dialect.format_params(list(row))
-            cursor.execute(f"INSERT INTO {table} VALUES ({placeholders})", formatted)
+        with closing(self.connection.cursor()) as cursor:
+            # format_params on each row is necessary because named paramstyles
+            # need a dict, not a list. Commits once after all rows, not per row.
+            for row in rows:
+                formatted = self.dialect.format_params(list(row))
+                cursor.execute(
+                    f"INSERT INTO {table} VALUES ({placeholders})", formatted
+                )
         self.connection.commit()

@@ -19,10 +19,18 @@ class DomainError(RelationalError):
 
 # Trailing underscore follows PEP 8's convention for avoiding collisions
 # with Python builtins (same convention as sum_, min_, max_ in aggregates.py).
-class AttributeError_(RelationalError):
+#
+# Multiple inheritance from the builtin AttributeError is load-bearing:
+# Python's hasattr() and three-argument getattr() special-case the builtin
+# AttributeError alone. Without AttributeError in the MRO, BaseRelation's
+# __getattr__ would propagate this exception out of hasattr/getattr and
+# break @cached_property, IDE introspection, pickling, and any caller that
+# uses hasattr() to test for column existence.
+class AttributeError_(RelationalError, AttributeError):
     """Raised when referencing an attribute that doesn't exist in a relation.
 
     Named with trailing underscore to avoid shadowing the builtin.
+    Inherits from AttributeError so hasattr/getattr behave correctly.
     """
 
 

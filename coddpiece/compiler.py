@@ -26,6 +26,7 @@ from typing import TYPE_CHECKING, Any
 from .predicates import Attr, CompoundPredicate, Literal, NotPredicate, Predicate
 from .relation import (
     Antijoin,
+    BaseRelation,
     CrossProduct,
     Difference,
     Division,
@@ -41,7 +42,6 @@ from .relation import (
     Semijoin,
     ThetaJoin,
     Union,
-    BaseRelation,
     _SetOp,
 )
 
@@ -57,15 +57,50 @@ class Compiler:
     chains like select→project are flattened into single queries.
     """
 
-    def __init__(self, dialect: Dialect):
+    def __init__(self, dialect: Dialect, bag_mode: bool = False):
         self.dialect = dialect
         # Flat list accumulating all query parameters across the entire tree.
         # Positional placeholders in the SQL correspond 1:1 to entries here.
-        self.params: list = []
+        # Element type is `Any` because the algebra accepts any Python value
+        # the user's domain registry permits (int/str/Decimal/datetime/...).
+        self.params: list[Any] = []
         # Monotonic counter for generating unique subquery aliases (t1, t2, ...).
         self._alias_counter = 0
+        # When True, emit SQL with bag (multiset) semantics throughout: no
+        # DISTINCT on individual SELECTs, and UNION ALL / INTERSECT ALL /
+        # EXCEPT ALL on set operators. Used by BagWrapper. Threading this
+        # as a flag (rather than post-hoc string replacement) is what makes
+        # `.bags()` actually deliver bag semantics over set operations,
+        # which the textbook teaching point requires.
+        self.bag_mode = bag_mode
 
-    def compile(self, expr: BaseRelation) -> tuple[str, list]:
+    def _select(self) -> str:
+        """SELECT keyword honoring bag_mode (with DISTINCT or without)."""
+        return "SELECT" if self.bag_mode else "SELECT DISTINCT"
+
+    def _setop_keyword(self, op_name: str) -> str:
+        """Set-op keyword honoring bag_mode (UNION/INTERSECT/EXCEPT [ALL])."""
+        # Bag-mode set ops use ALL: SQL's bare UNION/INTERSECT/EXCEPT are
+        # set operators (they dedupe). Without this branch, .bags() over
+        # a set operator would silently dedupe the result and the
+        # set-vs-bag teaching contrast would be invisible.
+        if not self.bag_mode:
+            return op_name
+        # Dialect-aware: SQLite has never implemented INTERSECT ALL or
+        # EXCEPT ALL. Surface the limitation here as a clear error rather
+        # than letting the driver fail with "syntax error near ALL".
+        if op_name not in self.dialect.setop_all_support:
+            raise NotImplementedError(
+                f"{op_name} ALL is not supported by the current backend. "
+                f"Bag semantics over {op_name} require a backend that "
+                f"implements {op_name} ALL (e.g. PostgreSQL, MySQL 8+); "
+                f"SQLite does not. Use a different backend or apply "
+                f".bags() to a sub-expression that does not include "
+                f"{op_name}."
+            )
+        return f"{op_name} ALL"
+
+    def compile(self, expr: BaseRelation) -> tuple[str, list[Any]]:
         """Compile an expression to (sql_string, param_list)."""
         self.params = []
         sql = self._visit(expr)
@@ -76,9 +111,14 @@ class Compiler:
         return f"t{self._alias_counter}"
 
     def _placeholder(self) -> str:
-        # Uses current param count as index — must be called *after* appending
-        # the value to self.params. Dialects use this to emit ?, %s, or :N.
-        return self.dialect.placeholder(len(self.params))
+        # The just-appended parameter sits at the 0-based index
+        # `len(self.params) - 1`. Dialects map that index to whichever
+        # placeholder shape they need: ?, %s, :N, :pN, or %(pN)s.
+        # Off-by-one here was a silent bug for paramstyles that use the
+        # index — qmark/format ignore it, so SQLite never noticed, but
+        # psycopg's pyformat expects %(p0)s as the first placeholder
+        # and would otherwise fail with "query parameter missing: p1".
+        return self.dialect.placeholder(len(self.params) - 1)
 
     def _qi(self, name: str) -> str:
         """Quote identifier shorthand."""
@@ -128,10 +168,11 @@ class Compiler:
     # --- Leaf ---
 
     def _compile_relation(self, node: Relation) -> str:
-        # DISTINCT enforces relational (set) semantics. BagWrapper strips it
-        # via string replacement when bag semantics are desired.
+        # DISTINCT enforces relational (set) semantics. BagWrapper sets
+        # bag_mode=True at compile time, which causes _select() to drop
+        # the DISTINCT keyword consistently across the whole tree.
         cols = ", ".join(self._qi(n) for n in node._schema().names())
-        return f"SELECT DISTINCT {cols} FROM {self._qi(node._table_name)}"
+        return f"{self._select()} {cols} FROM {self._qi(node._table_name)}"
 
     # --- Selection ---
 
@@ -139,7 +180,7 @@ class Compiler:
         source, alias = self._as_source(node.child)
         where_sql = self._compile_predicate(node.predicate)
         cols = ", ".join(self._qi(n) for n in node._schema().names())
-        return f"SELECT DISTINCT {cols} FROM {source} WHERE {where_sql}"
+        return f"{self._select()} {cols} FROM {source} WHERE {where_sql}"
 
     # --- Projection ---
 
@@ -164,10 +205,10 @@ class Compiler:
             sel = node.child
             source, alias = self._as_source(sel.child)
             where_sql = self._compile_predicate(sel.predicate)
-            return f"SELECT DISTINCT {cols} FROM {source} WHERE {where_sql}"
+            return f"{self._select()} {cols} FROM {source} WHERE {where_sql}"
 
         source, alias = self._as_source(node.child)
-        return f"SELECT DISTINCT {cols} FROM {source}"
+        return f"{self._select()} {cols} FROM {source}"
 
     # --- Rename ---
 
@@ -187,16 +228,19 @@ class Compiler:
             else:
                 col_exprs.append(old)
         cols = ", ".join(col_exprs)
-        return f"SELECT DISTINCT {cols} FROM {source}"
+        return f"{self._select()} {cols} FROM {source}"
 
     # --- Set Operations ---
 
     def _compile_setop(self, node: _SetOp) -> str:
-        # No DISTINCT needed: SQL's UNION/INTERSECT/EXCEPT are set operations
-        # by default (UNION ALL would be the bag variant).
+        # No DISTINCT needed on the per-side SELECTs: SQL's UNION/INTERSECT/
+        # EXCEPT are themselves set operators by default (they dedupe the
+        # combined result). For bag mode, _setop_keyword switches to
+        # UNION ALL / INTERSECT ALL / EXCEPT ALL so the outer operator
+        # also stops deduping.
         left_sql = self._visit(node.left)
         right_sql = self._visit(node.right)
-        return f"{left_sql} {node.op_name} {right_sql}"
+        return f"{left_sql} {self._setop_keyword(node.op_name)} {right_sql}"
 
     # --- Cross Product ---
 
@@ -211,7 +255,7 @@ class Compiler:
         right_cols = [f"{ra}.{self._qi(n)}" for n in node.right._schema().names()]
         cols = ", ".join(left_cols + right_cols)
 
-        return f"SELECT DISTINCT {cols} FROM {ls} AS {la}, {rs} AS {ra}"
+        return f"{self._select()} {cols} FROM {ls} AS {la}, {rs} AS {ra}"
 
     # --- Natural Join ---
 
@@ -223,7 +267,6 @@ class Compiler:
         # for teaching — students see exactly which columns are being matched.
         common = node.left._schema().common(node.right._schema())
         common_names = common.names()
-        common_set = set(common_names)
 
         # Build ON clause — common attributes taken from left side, matching
         # the schema rule in Schema.join_compose().
@@ -233,16 +276,24 @@ class Compiler:
         ]
         on_clause = " AND ".join(on_parts)
 
-        # Select list: common from left, rest of left, rest of right
+        # Select list MUST be driven by node._schema().names(), not by
+        # (common + left_only + right_only). Schema.join_compose preserves
+        # left-side ordering — common attributes keep their original position
+        # in the left schema — so iterating left_only/right_only would put
+        # columns in a different order than the schema reports. Downstream
+        # consumers (str(), collect() indexing, render_table headers) trust
+        # schema().names(); SQL must match.
+        left_names = set(node.left._schema().names())
         cols = []
-        for n in common_names:
-            cols.append(f"{la}.{self._qi(n)}")
-        for n in node.left._schema().names():
-            if n not in common_set:
-                cols.append(f"{la}.{self._qi(n)}")
-        for n in node.right._schema().names():
-            if n not in common_set:
-                cols.append(f"{ra}.{self._qi(n)}")
+        for n in node._schema().names():
+            q = self._qi(n)
+            if n in left_names:
+                # Common attributes live in the left schema, so they end up
+                # qualified by the left alias here — same convention as the
+                # ON clause and as Schema.join_compose's left-wins rule.
+                cols.append(f"{la}.{q}")
+            else:
+                cols.append(f"{ra}.{q}")
         col_list = ", ".join(cols)
 
         # Use table names directly if base relations
@@ -250,7 +301,7 @@ class Compiler:
         right_from = self._from_with_alias(node.right, rs, ra)
 
         return (
-            f"SELECT DISTINCT {col_list} "
+            f"{self._select()} {col_list} "
             f"FROM {left_from} "
             f"JOIN {right_from} ON {on_clause}"
         )
@@ -284,7 +335,7 @@ class Compiler:
         right_from = self._from_with_alias(node.right, rs, ra)
 
         return (
-            f"SELECT DISTINCT {cols} "
+            f"{self._select()} {cols} "
             f"FROM {left_from} "
             f"JOIN {right_from} ON {on_sql}"
         )
@@ -307,7 +358,7 @@ class Compiler:
         right_from = self._from_with_alias(node.right, rs, ra)
 
         return (
-            f"SELECT DISTINCT {cols} "
+            f"{self._select()} {cols} "
             f"FROM {left_from} "
             f"JOIN {right_from} "
             f"ON {la}.{self._qi(node.left_attr)} = {ra}.{self._qi(node.right_attr)}"
@@ -331,7 +382,7 @@ class Compiler:
         right_from = self._from_with_alias(node.right, rs, ra)
 
         return (
-            f"SELECT DISTINCT {cols} FROM {left_from} "
+            f"{self._select()} {cols} FROM {left_from} "
             f"WHERE EXISTS (SELECT 1 FROM {right_from} WHERE {corr})"
         )
 
@@ -353,7 +404,7 @@ class Compiler:
         right_from = self._from_with_alias(node.right, rs, ra)
 
         return (
-            f"SELECT DISTINCT {cols} FROM {left_from} "
+            f"{self._select()} {cols} FROM {left_from} "
             f"WHERE NOT EXISTS (SELECT 1 FROM {right_from} WHERE {corr})"
         )
 
@@ -382,23 +433,29 @@ class Compiler:
         # COALESCE for common attributes: in an outer join, a common attribute
         # may be NULL on one side. COALESCE picks the non-NULL value, matching
         # relational algebra semantics where the join attribute is always present.
+        #
+        # As in _compile_naturaljoin above, the SELECT order MUST follow
+        # node._schema().names() rather than (common + left_only + right_only).
+        # Schema.join_compose preserves left-side positions for common attrs,
+        # so any other iteration order would silently desync columns from the
+        # reported schema.
+        left_names = set(node.left._schema().names())
         cols = []
-        for n in common_names:
+        for n in node._schema().names():
             q = self._qi(n)
-            cols.append(f"COALESCE({la}.{q}, {ra}.{q}) AS {q}")
-        for n in node.left._schema().names():
-            if n not in common_set:
-                cols.append(f"{la}.{self._qi(n)}")
-        for n in node.right._schema().names():
-            if n not in common_set:
-                cols.append(f"{ra}.{self._qi(n)}")
+            if n in common_set:
+                cols.append(f"COALESCE({la}.{q}, {ra}.{q}) AS {q}")
+            elif n in left_names:
+                cols.append(f"{la}.{q}")
+            else:
+                cols.append(f"{ra}.{q}")
         col_list = ", ".join(cols)
 
         left_from = self._from_with_alias(node.left, ls, la)
         right_from = self._from_with_alias(node.right, rs, ra)
 
         return (
-            f"SELECT DISTINCT {col_list} "
+            f"{self._select()} {col_list} "
             f"FROM {left_from} "
             f"{join_type} JOIN {right_from} ON {on_clause}"
         )
@@ -460,6 +517,12 @@ class Compiler:
 
         # Compile the divisor (right side).
         right_sql = self._visit(node.right)
+        # Every derived table in a FROM clause needs an alias for portability.
+        # SQLite tolerates unaliased subqueries; PostgreSQL ("subquery in FROM
+        # must have an alias") and several other backends do not. This alias
+        # is purely structural — the inner SELECT references divisor columns
+        # unqualified, which works because there is no other source in scope.
+        divisor_alias = self._next_alias()
 
         # The dividend must be visited a second time for the inner correlated
         # subquery — it needs its own alias distinct from the outer reference.
@@ -472,11 +535,11 @@ class Compiler:
         dividend_from = self._from_with_alias(node.left, ls, dividend_alias)
 
         return (
-            f"SELECT DISTINCT {result_cols} "
+            f"{self._select()} {result_cols} "
             f"FROM {dividend_from} "
             f"WHERE NOT EXISTS ("
             f"SELECT {', '.join(self._qi(n) for n in divisor_attrs)} "
-            f"FROM ({right_sql}) "
+            f"FROM ({right_sql}) AS {divisor_alias} "
             f"EXCEPT "
             f"SELECT {inner_divisor_cols} "
             f"FROM {inner_from} "

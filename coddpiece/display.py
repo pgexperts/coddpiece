@@ -17,6 +17,8 @@ produces a fallback rendering (e.g. "<NewNode>") instead of a real one.
 
 from __future__ import annotations
 
+import re
+
 from .relation import (
     Antijoin,
     BaseRelation,
@@ -36,7 +38,6 @@ from .relation import (
     ThetaJoin,
     Union,
 )
-
 
 # ---------------------------------------------------------------------------
 # Algebra notation
@@ -130,14 +131,13 @@ def render_algebra(node: BaseRelation) -> str:
 # Tree renderer
 # ---------------------------------------------------------------------------
 
-def render_tree(node: BaseRelation, prefix: str = "", is_last: bool = True) -> str:
-    """Render an expression as an indented tree with box-drawing characters.
-
-    The `prefix`/`is_last` parameters exist for API symmetry with typical
-    tree-printing helpers but are not used — _tree_walk always starts with an
-    empty prefix at the root so output is left-aligned.
-    """
+def render_tree(node: BaseRelation) -> str:
+    """Render an expression as an indented tree with box-drawing characters."""
     lines: list[str] = []
+    # Recursion always begins at the root with empty prefix and connector;
+    # the recursive helper extends both as it descends. Exposing them at the
+    # public API would be misleading — there is no caller use case for
+    # rendering a subtree at non-root depth.
     _tree_walk(node, lines, "", "")
     return "\n".join(lines)
 
@@ -240,9 +240,21 @@ def _get_children(node: BaseRelation) -> list[BaseRelation]:
         return []
     if isinstance(node, (Selection, Projection, Rename, Grouping)):
         return [node.child]
-    # Pragmatic shortcut: all binary nodes (joins, set ops, division) have
-    # left/right attributes, so hasattr avoids listing every binary type.
-    if hasattr(node, "left") and hasattr(node, "right"):
+    # Binary nodes: enumerate explicitly so the static type carries through.
+    # We can't shortcut via hasattr(node, "left") because BaseRelation's
+    # __getattr__ proxies arbitrary names into Attr objects; that would
+    # both confuse the type checker and accidentally treat a real binary
+    # node's `.left` as a column reference if a future refactor introduced
+    # one. Listing the binary node types keeps the dispatch explicit and
+    # matches the "four coordinated edit points" rule in CLAUDE.md.
+    if isinstance(
+        node,
+        (
+            Union, Intersect, Difference,
+            CrossProduct, NaturalJoin, ThetaJoin, Equijoin,
+            Semijoin, Antijoin, OuterJoin, Division,
+        ),
+    ):
         return [node.left, node.right]
     return []
 
@@ -469,8 +481,6 @@ def format_sql(sql: str) -> str:
     # Simple regex-based formatter. The paren-counting indenter is approximate —
     # it doesn't parse SQL, just counts ( vs ) per line. Works well enough for
     # the compiler's relatively regular output.
-    import re
-
     formatted = sql
     for kw in ["FROM", "WHERE", "JOIN", "LEFT OUTER JOIN", "RIGHT OUTER JOIN",
                "FULL OUTER JOIN", "GROUP BY", "HAVING", "ORDER BY",
@@ -478,7 +488,7 @@ def format_sql(sql: str) -> str:
         # Only break before top-level clauses (not inside subqueries)
         formatted = re.sub(
             rf'\s+({kw})\b',
-            rf'\n\1',
+            r'\n\1',
             formatted,
         )
 

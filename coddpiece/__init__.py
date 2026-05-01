@@ -19,19 +19,19 @@ Quick start:
 # Public API surface. Internal modules (compiler, display, predicates) are
 # intentionally excluded — users interact with them indirectly through
 # BaseRelation methods like .explain(), .select(), etc.
+from .aggregates import avg, count, max_, min_, sum_
+from .datasets import employees_db, suppliers_and_parts
 from .engine import Engine
-from .schema import Schema, Attribute
-from .relation import Relation
-from .aggregates import count, sum_, avg, min_, max_
-from .datasets import suppliers_and_parts, employees_db
 from .errors import (
-    RelationalError,
-    SchemaError,
-    DomainError,
     AttributeError_,
+    DomainError,
     EngineError,
     PredicateError,
+    RelationalError,
+    SchemaError,
 )
+from .relation import Relation
+from .schema import Attribute, Schema
 
 __all__ = [
     "Engine",

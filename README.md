@@ -1,5 +1,7 @@
 # coddpiece
 
+[![CI](https://github.com/pgexperts/coddpiece/actions/workflows/ci.yml/badge.svg)](https://github.com/pgexperts/coddpiece/actions/workflows/ci.yml)
+
 A Python relational algebra teaching library backed by real databases via DB-API 2.0.
 
 **Learn relational algebra first. Then SQL makes sense.**
@@ -401,6 +403,12 @@ engine = Engine(pymysql.connect(db="mydb"))
 
 coddpiece auto-detects the connection's parameter style (`?` vs `%s`),
 identifier quoting, and introspects table schemas from the database.
+
+> **Backend coverage status.** SQLite is exercised by every test in CI.
+> PostgreSQL and MySQL paths are implemented — paramstyle, quoting, and
+> schema introspection branches all exist — but are not currently run
+> against live databases in CI. If you use coddpiece on PG or MySQL and
+> spot a regression in those paths, please open an issue.
 
 ### Complete Operation Reference
 

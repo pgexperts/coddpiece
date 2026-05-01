@@ -59,6 +59,11 @@ class Attr:
     def __ne__(self, other: Any) -> Predicate:  # type: ignore[override]
         return Predicate("!=", self, _wrap(other))
 
+    # Ordering comparisons return Predicate instead of NotImplemented/bool —
+    # same expression-tree trick as __eq__/__ne__ above. Unlike __eq__/__ne__,
+    # `object` does not define __lt__/__le__/__gt__/__ge__, so these are
+    # FRESH method definitions rather than overrides — no `type: ignore`
+    # needed (mypy's `warn_unused_ignores` would flag a stray one).
     def __lt__(self, other: Any) -> Predicate:
         return Predicate("<", self, _wrap(other))
 

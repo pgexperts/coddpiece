@@ -25,8 +25,13 @@ classifiers = [
     "Typing :: Typed",
 ]
 
+[project.urls]
+Homepage = "https://github.com/pgexperts/coddpiece"
+Repository = "https://github.com/pgexperts/coddpiece"
+Issues = "https://github.com/pgexperts/coddpiece/issues"
+
 [project.optional-dependencies]
-dev = ["pytest>=8.0"]
+dev = ["pytest>=8.0", "ruff>=0.6", "mypy>=1.10"]
 postgres = ["psycopg[binary]>=3.1"]
 
 [tool.pytest.ini_options]
@@ -34,3 +39,39 @@ testpaths = ["tests"]
 
 [tool.setuptools.packages.find]
 include = ["coddpiece*"]
+
+# Lint config kept minimal: the rule set selected here is the conservative
+# default (style + correctness + import order + a handful of bugbear/comprehension
+# checks). Add more rule families only with a justification — surprise rules
+# in CI are a frequent source of friction for contributors.
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "F",    # pyflakes
+    "I",    # isort (import order)
+    "UP",   # pyupgrade (modernize syntax for target version)
+    "B",    # flake8-bugbear
+    "C4",   # flake8-comprehensions
+    "SIM",  # flake8-simplify
+]
+# Long lines exist by design in some compiled-SQL strings and error
+# messages; we're not chasing E501 across the whole tree.
+ignore = ["E501"]
+
+# Type-check posture: the package ships `py.typed`, so types are part
+# of the public contract. We do NOT enable `strict` wholesale yet — the
+# Attr proxy's deliberate Liskov violation on comparison operators is
+# expected to require localized `# type: ignore[override]` comments
+# rather than a project-wide opt-out. Tighten over time.
+[tool.mypy]
+python_version = "3.10"
+files = ["coddpiece"]
+warn_unused_ignores = true
+warn_redundant_casts = true
+warn_unreachable = true
+no_implicit_optional = true
+check_untyped_defs = true

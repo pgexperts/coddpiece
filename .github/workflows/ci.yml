@@ -26,5 +26,59 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e ".[dev]"
 
+      # Lint and type-check first: cheaper than pytest, fails fast, and
+      # the package ships `py.typed` so type correctness is part of the
+      # public contract — not an optional afterthought.
+      - name: Lint with ruff
+        run: ruff check coddpiece tests
+
+      - name: Type-check with mypy
+        run: mypy coddpiece
+
       - name: Run tests
         run: python -m pytest tests/ -v
+
+  # Separate job: exercise the PostgreSQL dialect branches against a
+  # real PG service container. Without this, paramstyle detection
+  # (psycopg → format), information_schema introspection, and the
+  # division SQL alias fix would only be tested through code review.
+  # The conftest's pg_engine fixture skips when DATABASE_URL is unset,
+  # so this job is the only place those tests actually run.
+  test-postgres:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: coddpiece_test
+        ports:
+          - 5432:5432
+        # health-check options keep `services` from racing tests:
+        # the job step only runs once the container reports ready.
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev,postgres]"
+
+      - name: Run PostgreSQL tests
+        env:
+          # Standard libpq connection URL; conftest's pg_engine fixture
+          # reads this and skips its tests when unset, so the whole job
+          # is gated on this env var being present.
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/coddpiece_test
+        run: python -m pytest tests/test_postgres.py -v

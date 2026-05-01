@@ -14,10 +14,10 @@ to be well-formed — downstream code never has to revalidate.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
-from typing import Iterator
 
 from .errors import AttributeError_, DomainError, SchemaError
 
@@ -293,7 +293,7 @@ class Schema:
         if only_right:
             lines.append(f"  Only in right: {', '.join(sorted(only_right))}")
         if domain_mismatches:
-            lines.append(f"  Domain mismatches:")
+            lines.append("  Domain mismatches:")
             lines.extend(domain_mismatches)
         if common and not domain_mismatches:
             lines.append(f"  Common:        {', '.join(sorted(common))}")
