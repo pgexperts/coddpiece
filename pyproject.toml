@@ -4,14 +4,17 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "coddpiece"
-version = "0.1.0"
-description = "coddpiece — A Python relational algebra teaching library backed by real databases via DB-API 2.0"
+version = "1.0.0"
+description = "A Python relational algebra teaching library backed by real databases via DB-API 2.0"
 readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.10"
+authors = [
+    {name = "Christophe Pettus", email = "christophe.pettus@pgexperts.com"},
+]
 keywords = ["relational-algebra", "sql", "database", "education", "teaching"]
 classifiers = [
-    "Development Status :: 3 - Alpha",
+    "Development Status :: 5 - Production/Stable",
     "Intended Audience :: Education",
     "Intended Audience :: Developers",
     "License :: OSI Approved :: MIT License",

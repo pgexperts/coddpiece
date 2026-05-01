@@ -5,6 +5,11 @@ dist/
 build/
 .venv/
 .pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
 .DS_Store
 .claude
 REVIEW.md
