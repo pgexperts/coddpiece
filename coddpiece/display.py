@@ -11,8 +11,8 @@ NEVER mutates it. All renderers take a BaseRelation root and return a string.
 
 Coupling note: adding a new node type requires touching FOUR functions in this
 file — render_algebra(), _node_label(), _gloss_walk(), and _get_children().
-CLAUDE.md lists these as the coordinated edit points; missing any of them
-produces a fallback rendering (e.g. "<NewNode>") instead of a real one.
+Missing any of them produces a fallback rendering (e.g. "<NewNode>") instead
+of a real one.
 """
 
 from __future__ import annotations
@@ -246,7 +246,8 @@ def _get_children(node: BaseRelation) -> list[BaseRelation]:
     # both confuse the type checker and accidentally treat a real binary
     # node's `.left` as a column reference if a future refactor introduced
     # one. Listing the binary node types keeps the dispatch explicit and
-    # matches the "four coordinated edit points" rule in CLAUDE.md.
+    # matches the "four coordinated edit points" rule documented at the
+    # top of this module.
     if isinstance(
         node,
         (

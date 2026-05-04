@@ -142,7 +142,7 @@ class Compiler:
         # Relation leaf, chains like σ(π(R)) produce a single SELECT
         # against R instead of SELECT ... FROM (SELECT ... FROM R).
         # Extending inlining to more node kinds is the main lever for
-        # improving output quality; see CLAUDE.md.
+        # improving output quality.
         if isinstance(node, Relation):
             name = self._qi(node._table_name)
             return name, node._table_name
@@ -194,10 +194,10 @@ class Compiler:
         # that mirrors how a human would write the same query.
         #
         # Tradeoff: we only peek one level down. Deeper algebra (e.g.,
-        # π(σ(π(σ(R))))) still nests. Generalizing this is the template
-        # CLAUDE.md points at for future compiler work — any similar
-        # pattern (e.g., σ(π(R)) → σ pushed into the projection's SELECT)
-        # would extend the same idea.
+        # π(σ(π(σ(R))))) still nests. Generalizing this is the obvious
+        # next step for future compiler work — any similar pattern (e.g.,
+        # σ(π(R)) → σ pushed into the projection's SELECT) would extend
+        # the same idea.
         # Chain-flattening optimization: merge Projection(Selection(X)) into a
         # single SELECT...WHERE instead of nesting a subquery. Only one level
         # is flattened — deeper nesting still produces subqueries.
@@ -494,7 +494,8 @@ class Compiler:
         # Division uses the "NOT EXISTS (divisor EXCEPT correlated dividend)"
         # pattern. This is the only operation that visits the same subtree
         # (the dividend) twice — once for the outer FROM, once for the inner
-        # correlated subquery. See CLAUDE.md invariants.
+        # correlated subquery. See the module-level invariants at the top
+        # of this file for the broader contract.
         ls, la = self._as_source(node.left)
         result_attrs = node._schema().names()
         divisor_attrs = node.right._schema().names()

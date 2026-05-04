@@ -876,7 +876,7 @@ class Division(BaseRelation):
         # types (e.g. str vs int), which most backends silently coerce in
         # surprising ways. Validating here keeps the error close to the
         # offending construction site, matching the eager-validation
-        # invariant in CLAUDE.md.
+        # invariant the rest of this module follows.
         left_schema = self.left._schema()
         right_schema = self.right._schema()
         for name in right_schema.names():
