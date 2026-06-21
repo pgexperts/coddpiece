@@ -218,6 +218,10 @@ s.outer_join(sp, how="right")  # all shipments, even without suppliers
 s.outer_join(sp, how="full")   # both
 ```
 
+> **Note:** `how="right"` and `how="full"` require **SQLite 3.39+** (2022),
+> when SQLite added `RIGHT`/`FULL OUTER JOIN`. `how="left"` works on all
+> supported versions. PostgreSQL and MySQL support all three.
+
 ### Set Operations
 
 These require both relations to have *identical schemas* (same attribute
@@ -409,6 +413,9 @@ identifier quoting, and introspects table schemas from the database.
 > schema introspection branches all exist — but are not currently run
 > against live databases in CI. If you use coddpiece on PG or MySQL and
 > spot a regression in those paths, please open an issue.
+>
+> Note that `RIGHT`/`FULL OUTER JOIN` require **SQLite 3.39+** (2022);
+> older SQLite builds will reject those queries.
 
 ### Complete Operation Reference
 

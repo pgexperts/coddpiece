@@ -486,9 +486,28 @@ def format_sql(sql: str) -> str:
     for kw in ["FROM", "WHERE", "JOIN", "LEFT OUTER JOIN", "RIGHT OUTER JOIN",
                "FULL OUTER JOIN", "GROUP BY", "HAVING", "ORDER BY",
                "UNION", "INTERSECT", "EXCEPT"]:
-        # Only break before top-level clauses (not inside subqueries)
+        # Only break before top-level clauses (not inside subqueries).
+        #
+        # The bare "JOIN" keyword is a space-delimited substring of every
+        # multi-word form ("LEFT OUTER JOIN", etc.). Without the guard below,
+        # this loop's bare-JOIN pass matches the space *inside* an already
+        # emitted "LEFT OUTER JOIN" and splits it across two lines
+        # ("LEFT OUTER\nJOIN ..."). Crucially, reordering the list so the
+        # multi-word forms run first does NOT help: the later bare-JOIN pass
+        # re-splits them regardless. The negative lookbehind makes bare JOIN
+        # decline to match a JOIN that belongs to a compound keyword, leaving
+        # the dedicated multi-word rules to break those clauses as one unit.
+        if kw == "JOIN":
+            pattern = (
+                r'\s+'
+                r'(?<!OUTER )(?<!INNER )(?<!LEFT )'
+                r'(?<!RIGHT )(?<!FULL )(?<!CROSS )'
+                r'(JOIN)\b'
+            )
+        else:
+            pattern = rf'\s+({kw})\b'
         formatted = re.sub(
-            rf'\s+({kw})\b',
+            pattern,
             r'\n\1',
             formatted,
         )

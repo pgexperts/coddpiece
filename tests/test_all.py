@@ -1130,3 +1130,54 @@ class TestPredicateDeadCodeRemoval:
         not_sql = s.select(~(s.city == "London")).sql()
         assert "NOT" in not_sql
         assert "params:" in not_sql
+
+
+class TestOuterJoinFormatting:
+    # format_sql() used to split multi-word OUTER JOIN keywords across two
+    # lines, because the bare-JOIN rewrite matched the space inside
+    # "LEFT OUTER JOIN". A negative lookbehind now keeps compound keywords
+    # intact while bare JOIN (natural/theta/equijoin) still breaks correctly.
+    def test_outer_join_keyword_not_split(self, sp_data):
+        s, p, sp, engine = sp_data
+        cases = {
+            "left": "LEFT OUTER JOIN",
+            "right": "RIGHT OUTER JOIN",
+            "full": "FULL OUTER JOIN",
+        }
+        for how, keyword in cases.items():
+            sql = s.outer_join(sp, how=how).sql()
+            # Contiguous one-line substring (the headline assertion).
+            assert keyword in sql, (how, sql)
+            # Never split as "... OUTER\nJOIN ...".
+            assert "OUTER\nJOIN" not in sql, (how, sql)
+            # Exactly one line begins with the compound keyword.
+            keyword_lines = [
+                ln for ln in sql.split("\n") if ln.strip().startswith(keyword)
+            ]
+            assert len(keyword_lines) == 1, (how, sql)
+
+    def test_bare_join_still_breaks(self, sp_data):
+        # The lookbehind that protects compound keywords must NOT suppress the
+        # bare JOIN that natural/theta/equijoin emit — it should still start
+        # its own line.
+        s, p, sp, engine = sp_data
+        sql = sp.join(s).sql()
+        join_lines = [
+            ln for ln in sql.split("\n") if ln.strip().startswith("JOIN")
+        ]
+        assert len(join_lines) == 1, sql
+
+    def test_division_subquery_indentation_preserved(self, sp_data):
+        # The fix touches only the bare-JOIN rule; the paren-counting indenter
+        # that lays out division's nested subqueries must be untouched.
+        s, p, sp, engine = sp_data
+        red_parts = p.select(p.color == "Red").project("pno")
+        sql = sp.project("sno", "pno").divide(red_parts).sql()
+        assert "NOT EXISTS" in sql
+        assert "EXCEPT" in sql
+        assert "OUTER\nJOIN" not in sql
+        # At least one nested FROM is indented (subquery layout intact).
+        assert any(
+            ln.startswith("  ") and ln.strip().startswith("FROM")
+            for ln in sql.split("\n")
+        ), sql

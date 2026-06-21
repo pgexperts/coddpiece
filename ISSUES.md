@@ -71,12 +71,12 @@ Legend: `[ ]` open · `[x]` resolved · `[~]` won't fix / by design.
 
 ## P4 — Display & docs
 
-- [ ] **E1 · `format_sql` splits `LEFT/RIGHT/FULL OUTER JOIN` across two lines.**
+- [x] **E1 · `format_sql` splits `LEFT/RIGHT/FULL OUTER JOIN` across two lines.**
   The keyword list processes bare `JOIN` before the multi-word forms, so the
   newline is inserted mid-keyword. Cosmetic but mangles a teaching artifact.
   *Fix:* order the keyword list longest-first (or special-case `… OUTER JOIN`).
 
-- [ ] **E2 · README overstates SQLite zero-setup for outer joins.** `RIGHT`/`FULL
+- [x] **E2 · README overstates SQLite zero-setup for outer joins.** `RIGHT`/`FULL
   OUTER JOIN` require SQLite ≥ 3.39 (2022); older platform Pythons raise
   `OperationalError`. *Fix:* add a one-line version caveat near the outer-join
   docs / backend-coverage note.
