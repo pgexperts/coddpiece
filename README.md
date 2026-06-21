@@ -678,6 +678,30 @@ and write the SQL directly.
 
 ---
 
+## Development
+
+```bash
+git clone https://github.com/pgexperts/coddpiece
+cd coddpiece
+pip install -e '.[dev]'   # pytest, ruff, mypy
+```
+
+Run the same checks CI does:
+
+```bash
+pytest              # SQLite suite; the PostgreSQL tests skip unless DATABASE_URL is set
+ruff check .
+mypy coddpiece
+```
+
+The internals are documented separately: see
+**[ARCHITECTURE.md](ARCHITECTURE.md)** for the module map and the load-bearing
+invariants, and **[THEORY.md](THEORY.md)** for the design rationale — why
+predicates hijack Python's comparison operators, why the expression tree uses
+identity equality, and the rest.
+
+---
+
 ## License
 
 MIT
