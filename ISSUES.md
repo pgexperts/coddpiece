@@ -96,7 +96,7 @@ Legend: `[ ]` open · `[x]` resolved · `[~]` won't fix / by design.
 
 ## P7 — Tests
 
-- [ ] **TT1 · Non-`qmark` paramstyle matrix is untested.**
+- [x] **TT1 · Non-`qmark` paramstyle matrix is untested.**
   `Dialect.placeholder()` and `format_params()` handle `numeric`/`named`/
   `format`/`pyformat`, but only `qmark` is exercised. *Fix:* unit tests pinning
   placeholder shape and the list-vs-dict `format_params` contract for each style.
