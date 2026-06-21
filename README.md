@@ -695,8 +695,10 @@ mypy coddpiece
 ```
 
 The internals are documented separately: see
-**[ARCHITECTURE.md](ARCHITECTURE.md)** for the module map and the load-bearing
-invariants, and **[THEORY.md](THEORY.md)** for the design rationale — why
+**[ARCHITECTURE.md](https://github.com/pgexperts/coddpiece/blob/main/ARCHITECTURE.md)**
+for the module map and the load-bearing invariants, and
+**[THEORY.md](https://github.com/pgexperts/coddpiece/blob/main/THEORY.md)** for
+the design rationale — why
 predicates hijack Python's comparison operators, why the expression tree uses
 identity equality, and the rest.
 
