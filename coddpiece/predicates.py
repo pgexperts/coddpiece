@@ -87,6 +87,11 @@ class Attr:
     # only hash-equal if they reference the exact same relation instance. This
     # is correct for the expression tree where identity, not structural equality,
     # determines equivalence.
+    # Non-obvious mechanic: @dataclass(frozen=True) would normally synthesize
+    # both __eq__ and __hash__, but dataclass only fills in dunders NOT already
+    # defined in the class body — so these hand-written __eq__/__hash__ win and
+    # coexist with frozen. (The expression-tree nodes in relation.py take the
+    # opposite route, passing eq=False to suppress the synthesized pair.)
     def __hash__(self) -> int:
         return hash((id(self.source), self.name))
 

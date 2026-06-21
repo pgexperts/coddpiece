@@ -33,6 +33,11 @@ class AggSpec:
         # attr == "*" only makes sense for COUNT, but guard defensively.
         if self.attr == "*":
             return int
+        # Cross-file invariant: the only caller, Grouping._schema(), runs
+        # after Grouping.__post_init__ has already verified each non-"*"
+        # aggregate attr exists on the child schema, so this lookup cannot
+        # raise here in normal flow. (Calling output_domain directly on an
+        # AggSpec with a bogus attr would still raise AttributeError_.)
         return schema[self.attr].domain
 
     def algebra(self) -> str:
