@@ -83,7 +83,7 @@ Legend: `[ ]` open · `[x]` resolved · `[~]` won't fix / by design.
 
 ## P5 — Typing
 
-- [ ] **T1 · Bare `list`/`tuple` generics in public signatures.**
+- [x] **T1 · Bare `list`/`tuple` generics in public signatures.**
   `Dialect.format_params(params: list)`, `Engine._insert_rows(rows: list[tuple])`,
   `Engine.create(rows: list[tuple] | None)`. A `py.typed` package leaks these.
   *Fix:* parameterize (`list[Any]`, `list[tuple[Any, ...]]`).
