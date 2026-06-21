@@ -14,3 +14,7 @@ htmlcov/
 .claude
 REVIEW.md
 CLAUDE.md
+
+# Local docs/scratch (e.g. dated review snapshots). Already-tracked files
+# under docs/ stay tracked; this only keeps new ones from being committed.
+docs/
