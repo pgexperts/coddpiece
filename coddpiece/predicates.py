@@ -28,12 +28,15 @@ class Literal:
     # bare) gives the compiler a uniform Attr|Literal dispatch: Attr -> column
     # reference, Literal -> `?` placeholder + appended param. This is what
     # makes the "literals never interpolated" SQL-safety invariant easy to
-    # enforce in compiler.py and Predicate.sql().
+    # enforce in compiler.py (see Compiler._compile_pred_operand).
     value: Any
 
     def __repr__(self) -> str:
+        # Strings render in double-quoted algebra form. Escape any embedded
+        # double-quote so a value containing one does not render unbalanced.
         if isinstance(self.value, str):
-            return f'"{self.value}"'
+            escaped = self.value.replace('"', '\\"')
+            return f'"{escaped}"'
         return repr(self.value)
 
 
@@ -172,29 +175,6 @@ class Predicate:
         sym = ALGEBRA_SYMBOLS[self.op]
         return f"{left}{sym}{right}"
 
-    def sql(self, dialect: Any = None) -> tuple[str, list]:
-        """Render as SQL fragment with parameters."""
-        # Returns (sql_string, param_values). Attr operands become column names
-        # in the SQL string; Literal operands become `?` placeholders with
-        # values appended to the params list. This prevents SQL injection.
-        # The left-then-right append order must match the `?` order in the string.
-        params: list = []
-
-        if isinstance(self.left, Attr):
-            left_sql = self.left.name
-        else:
-            left_sql = "?"
-            params.append(self.left.value)
-
-        if isinstance(self.right, Attr):
-            right_sql = self.right.name
-        else:
-            right_sql = "?"
-            params.append(self.right.value)
-
-        sql_op = SQL_OPERATORS[self.op]
-        return f"{left_sql} {sql_op} {right_sql}", params
-
     def __repr__(self) -> str:
         return self.algebra()
 
@@ -228,15 +208,6 @@ class CompoundPredicate:
         sym = ALGEBRA_SYMBOLS[self.op]
         return f"({self.left.algebra()} {sym} {self.right.algebra()})"
 
-    def sql(self, dialect: Any = None) -> tuple[str, list]:
-        left_sql, left_params = self.left.sql(dialect)
-        right_sql, right_params = self.right.sql(dialect)
-        sql_op = SQL_OPERATORS[self.op]
-        # Params are concatenated left-before-right, matching the order of `?`
-        # placeholders in the generated SQL string. This ordering invariant is
-        # critical — swapping would bind values to the wrong placeholders.
-        return f"({left_sql} {sql_op} {right_sql})", left_params + right_params
-
     def __repr__(self) -> str:
         return self.algebra()
 
@@ -268,13 +239,6 @@ class NotPredicate:
 
     def algebra(self) -> str:
         return f"¬({self.operand.algebra()})"
-
-    def sql(self, dialect: Any = None) -> tuple[str, list]:
-        # Always parenthesize the inner fragment — NOT has higher precedence
-        # than AND/OR in SQL, so `NOT a AND b` would bind wrong. Parens make
-        # the generated SQL precedence-safe regardless of what `operand` is.
-        inner_sql, params = self.operand.sql(dialect)
-        return f"NOT ({inner_sql})", params
 
     def __repr__(self) -> str:
         return self.algebra()

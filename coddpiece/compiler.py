@@ -23,7 +23,14 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from .predicates import Attr, CompoundPredicate, Literal, NotPredicate, Predicate
+from .predicates import (
+    SQL_OPERATORS,
+    Attr,
+    CompoundPredicate,
+    Literal,
+    NotPredicate,
+    Predicate,
+)
 from .relation import (
     Antijoin,
     BaseRelation,
@@ -594,7 +601,6 @@ class Compiler:
         # The alias/schema params are only non-None for join predicates, where
         # column references must be table-qualified to resolve ambiguity.
         if isinstance(pred, Predicate):
-            from .predicates import SQL_OPERATORS
             left_sql = self._compile_pred_operand(
                 pred.left, left_alias, right_alias, left_schema, right_schema
             )

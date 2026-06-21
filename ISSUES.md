@@ -53,7 +53,7 @@ Legend: `[ ]` open · `[x]` resolved · `[~]` won't fix / by design.
 
 ## P3 — Dead code & imports
 
-- [ ] **D1 · `Predicate.sql()` / `CompoundPredicate.sql()` / `NotPredicate.sql()`
+- [x] **D1 · `Predicate.sql()` / `CompoundPredicate.sql()` / `NotPredicate.sql()`
   are dead and dialect-blind.** Nothing outside the predicate hierarchy calls
   them; the real path is `Compiler._compile_predicate`. They hardcode `?`
   placeholders and unqualified column names, contradicting the Dialect invariant
@@ -61,11 +61,11 @@ Legend: `[ ]` open · `[x]` resolved · `[~]` won't fix / by design.
   *Fix:* remove the three methods (and the now-unused `SQL_OPERATORS` import in
   them stays available for the compiler).
 
-- [ ] **D2 · Function-local import in the compiler.** `_compile_predicate` does
+- [x] **D2 · Function-local import in the compiler.** `_compile_predicate` does
   `from .predicates import SQL_OPERATORS` though `predicates` is already imported
   at module top with no circular-import reason. *Fix:* hoist to the top import.
 
-- [ ] **D3 · `Literal.__repr__` does not escape embedded quotes.** Strings are
+- [x] **D3 · `Literal.__repr__` does not escape embedded quotes.** Strings are
   wrapped with a hand-written `"…"`; a value containing `"` breaks the algebra
   notation. *Fix:* escape, or use `repr`-based quoting.
 

@@ -1090,3 +1090,43 @@ class TestEquijoinEagerValidation:
         joined = a.equijoin(c, "k", "j")  # must not raise
         assert joined.schema().names() == ("k", "shared", "av", "cv")
         assert joined.collect() == [(1, 9, 100, 5)]
+
+
+class TestPredicateDeadCodeRemoval:
+    # The predicate classes used to carry a dead, dialect-blind .sql() method
+    # (hardcoded "?" placeholders) that nothing outside the predicate hierarchy
+    # called — the real path is Compiler._compile_predicate. These tests lock in
+    # its removal and the Literal repr quote-escaping that landed with it.
+    def test_attr_eq_literal_with_embedded_quote(self, sp_data):
+        s, p, sp, engine = sp_data
+        pred = s.city == 'a"b'
+        assert isinstance(pred, Predicate)
+        assert pred.algebra() == 'city="a\\"b"'
+
+    def test_attr_eq_plain_string_unchanged(self, sp_data):
+        s, p, sp, engine = sp_data
+        assert (s.city == "London").algebra() == 'city="London"'
+        assert (s.status == 20).algebra() == "status=20"
+
+    def test_predicate_has_no_sql_method(self, sp_data):
+        from coddpiece.predicates import (
+            CompoundPredicate,
+            NotPredicate,
+            Predicate,
+        )
+        assert not hasattr(Predicate, "sql")
+        assert not hasattr(CompoundPredicate, "sql")
+        assert not hasattr(NotPredicate, "sql")
+
+    def test_compound_and_not_sql_still_compiles(self, sp_data):
+        # End-to-end guard: removing the predicate .sql() helpers did not
+        # regress the real compile path.
+        s, p, sp, engine = sp_data
+        sql = s.select((s.city == "London") & (s.status > 10)).sql()
+        assert "WHERE" in sql
+        assert "AND" in sql
+        assert "params:" in sql
+        assert "London" in sql
+        not_sql = s.select(~(s.city == "London")).sql()
+        assert "NOT" in not_sql
+        assert "params:" in not_sql
