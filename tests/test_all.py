@@ -877,3 +877,105 @@ class TestSQLTypePrefixMatch:
         assert engine._sql_type_to_python("INT(11)") is int
         # And a real timestamp type still resolves.
         assert engine._sql_type_to_python("TIMESTAMP") is datetime
+
+
+class TestNestedSetOps:
+    # Regression for chained set operations compiling without grouping.
+    # SQL set operators have no precedence and associate left-to-right, so
+    # bare compound SELECTs side by side flatten the algebra tree: e.g.
+    # a.difference(b.difference(c)) would compile to ((a EXCEPT b) EXCEPT c)
+    # and return the wrong rows. The compiler now subquery-wraps any operand
+    # that is itself a set operation. Only test_except_right_nesting and
+    # test_union_over_intersect_precedence go red on the unpatched compiler;
+    # the rest are non-regression guards (left-nesting and bag-mode behavior
+    # were already correct and must stay correct).
+
+    def test_except_right_nesting(self, engine):
+        # a-(b-c): b-c={2}, so a-{2}={1,3}. Pre-fix this flattened to
+        # (a-b)-c={1} (SQLite-reproducible wrong result).
+        a = engine.create("nse_a", {"x": int}, rows=[(1,), (2,), (3,)])
+        b = engine.create("nse_b", {"x": int}, rows=[(2,), (3,), (4,)])
+        c = engine.create("nse_c", {"x": int}, rows=[(3,), (4,), (5,)])
+        expr = a.difference(b.difference(c))
+        assert expr.algebra() == "(nse_a − (nse_b − nse_c))"
+        assert sorted(r[0] for r in expr.collect()) == [1, 3]
+
+    def test_except_left_nesting_unchanged(self, engine):
+        # (a-b)-c: a-b={1}, {1}-c={1}. Left-nesting was already correct;
+        # the fix must not regress it.
+        a = engine.create("nsl_a", {"x": int}, rows=[(1,), (2,), (3,)])
+        b = engine.create("nsl_b", {"x": int}, rows=[(2,), (3,), (4,)])
+        c = engine.create("nsl_c", {"x": int}, rows=[(3,), (4,), (5,)])
+        expr = a.difference(b).difference(c)
+        assert sorted(r[0] for r in expr.collect()) == [1]
+
+    def test_union_over_intersect_precedence(self, engine):
+        # a UNION (b INTERSECT c): b∩c={3,4}, a∪{3,4}={1,2,3,4}. Pre-fix the
+        # flattened (a UNION b) INTERSECT c gave {3,4}.
+        a = engine.create("nui_a", {"x": int}, rows=[(1,), (2,), (3,)])
+        b = engine.create("nui_b", {"x": int}, rows=[(2,), (3,), (4,)])
+        c = engine.create("nui_c", {"x": int}, rows=[(3,), (4,), (5,)])
+        expr = a.union(b.intersect(c))
+        assert sorted(r[0] for r in expr.collect()) == [1, 2, 3, 4]
+
+    def test_setop_left_operand_grouped(self, engine):
+        # (a UNION b) - c with the set-op on the LEFT operand: a∪b={1,2,3},
+        # minus c={3,4} -> {1,2}. Confirms left operands are wrapped too.
+        a = engine.create("nlo_a", {"x": int}, rows=[(1,), (2,)])
+        b = engine.create("nlo_b", {"x": int}, rows=[(2,), (3,)])
+        c = engine.create("nlo_c", {"x": int}, rows=[(3,), (4,)])
+        expr = a.union(b).difference(c)
+        assert sorted(r[0] for r in expr.collect()) == [1, 2]
+
+    def test_nested_union_all_preserves_bag(self, engine):
+        # Nested UNION ALL in bag mode must keep duplicates: the wrapper
+        # SELECT honors bag_mode (no DISTINCT) so the inner multiset survives.
+        # d=[1,1,2], e=[2,3], f=[3,4]; d ∪ALL (e ∪ALL f) -> [1,1,2,2,3,3,4].
+        d = engine.create("nua_d", {"x": int}, rows=[(1,), (1,), (2,)])
+        e = engine.create("nua_e", {"x": int}, rows=[(2,), (3,)])
+        f = engine.create("nua_f", {"x": int}, rows=[(3,), (4,)])
+        rows = sorted(r[0] for r in d.union(e.union(f)).bags().collect())
+        assert rows == [1, 1, 2, 2, 3, 3, 4]
+
+    def test_nested_intersect_all_still_raises_on_sqlite(self, engine):
+        # Bag semantics over nested INTERSECT must still surface the SQLite
+        # INTERSECT ALL limitation (the fix does not change _setop_keyword).
+        d = engine.create("nia_d", {"x": int}, rows=[(1,), (2,), (3,)])
+        e = engine.create("nia_e", {"x": int}, rows=[(2,), (3,)])
+        f = engine.create("nia_f", {"x": int}, rows=[(3,), (4,)])
+        with pytest.raises(NotImplementedError, match="INTERSECT ALL"):
+            d.intersect(e.intersect(f)).bags().collect()
+
+
+class TestGroupingAggValidation:
+    # Aggregate target attributes must be validated at construction, the
+    # same as group keys. Pre-fix, an unknown agg attr was emitted as a
+    # quoted identifier; SQLite reads it as a string literal and SUM/AVG of
+    # it returns 0.0 with no error, so a typo produced silent wrong numbers.
+    def test_bad_agg_attr_raises_at_construction(self, sp_data):
+        s, p, sp, engine = sp_data
+        with pytest.raises(AttributeError_):
+            sp.group("sno", bad=sum_("nonexistent"))
+
+    def test_bad_agg_attr_message(self, sp_data):
+        s, p, sp, engine = sp_data
+        with pytest.raises(AttributeError_) as exc:
+            sp.group("sno", bad=sum_("nonexistent"))
+        msg = str(exc.value)
+        assert "nonexistent" in msg
+        assert "sno" in msg and "pno" in msg and "qty" in msg
+
+    def test_count_star_default_still_works(self, sp_data):
+        # Guards the "*" exemption: count() with its default must still
+        # construct and collect.
+        s, p, sp, engine = sp_data
+        result = sp.group(total=count()).collect()
+        assert len(result) == 1
+        assert result[0][0] == 12
+
+    def test_real_agg_attrs_still_work(self, sp_data):
+        # Guards that valid aggregate targets still validate and compute.
+        s, p, sp, engine = sp_data
+        result = sp.group("sno", n=count("pno"), t=sum_("qty")).collect()
+        result_dict = {row[0]: (row[1], row[2]) for row in result}
+        assert result_dict["S1"] == (6, 1300)

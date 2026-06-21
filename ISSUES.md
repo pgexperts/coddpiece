@@ -12,7 +12,7 @@ Legend: `[ ]` open · `[x]` resolved · `[~]` won't fix / by design.
 
 ## P1 — Correctness (wrong results)
 
-- [ ] **C1 · Chained set operations are compiled without parentheses.**
+- [x] **C1 · Chained set operations are compiled without parentheses.**
   `Compiler._compile_setop` emits `left OP right` with both operands as bare
   `SELECT … OP …` strings, so a nested set-op tree is flattened. SQLite evaluates
   a flat compound left-to-right, so `a.difference(b.difference(c))` — algebra
@@ -23,7 +23,7 @@ Legend: `[ ]` open · `[x]` resolved · `[~]` won't fix / by design.
   *Fix:* parenthesize (or subquery-wrap) any set-op operand that is itself a
   set-op. Regression test: three-relation `EXCEPT` nesting + mixed precedence.
 
-- [ ] **C2 · Invalid aggregate attribute silently returns garbage.**
+- [x] **C2 · Invalid aggregate attribute silently returns garbage.**
   `Grouping.__post_init__` validates group keys but not the attributes inside
   `aggs`, and `_compile_grouping` emits `SUM("col")` without a schema check.
   `sp.group("sno", bad=sum_("nope")).collect()` returns `[('S1', 0.0), …]` on

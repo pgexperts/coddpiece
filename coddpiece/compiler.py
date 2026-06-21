@@ -232,14 +232,47 @@ class Compiler:
 
     # --- Set Operations ---
 
+    def _setop_operand(self, node: BaseRelation) -> str:
+        # Render one side of a set operation, wrapping it in a derived-table
+        # SELECT when the operand is ITSELF a set operation.
+        #
+        # Why this is required for correctness: SQL set operators have no
+        # precedence and associate left-to-right, so emitting bare compound
+        # SELECTs side by side ("a EXCEPT b EXCEPT c") always parses as
+        # ((a EXCEPT b) EXCEPT c) regardless of the algebra tree's shape.
+        # That silently flattens right-nested EXCEPT (a-(b-c)) and mangles
+        # any mixed UNION/INTERSECT/EXCEPT chain. Grouping makes the tree
+        # structure explicit.
+        #
+        # Why subquery-wrap and not a parenthesized compound: SQLite rejects
+        # a parenthesized compound select as a set-op operand
+        # ("a EXCEPT (b EXCEPT c)" => syntax error near "("); it only accepts
+        # "(SELECT ...)" as a derived table. "SELECT cols FROM (<compound>) AS
+        # tN" is accepted by both SQLite and PostgreSQL (PG requires the
+        # alias; SQLite tolerates it) — the same pattern _compile_division
+        # already uses. The wrapper SELECT routes through _select(), so it
+        # drops DISTINCT under bag_mode and the multiset (UNION ALL ...)
+        # semantics of the inner compound survive unchanged.
+        sql = self._visit(node)
+        if isinstance(node, _SetOp):
+            cols = ", ".join(self._qi(n) for n in node._schema().names())
+            alias = self._next_alias()
+            return f"{self._select()} {cols} FROM ({sql}) AS {alias}"
+        return sql
+
     def _compile_setop(self, node: _SetOp) -> str:
         # No DISTINCT needed on the per-side SELECTs: SQL's UNION/INTERSECT/
         # EXCEPT are themselves set operators by default (they dedupe the
         # combined result). For bag mode, _setop_keyword switches to
         # UNION ALL / INTERSECT ALL / EXCEPT ALL so the outer operator
         # also stops deduping.
-        left_sql = self._visit(node.left)
-        right_sql = self._visit(node.right)
+        #
+        # Operands that are themselves set operations are subquery-wrapped by
+        # _setop_operand so the tree's nesting is explicit; SQL set operators
+        # are otherwise left-associative and precedence-free, which would
+        # flatten the chain and produce wrong rows.
+        left_sql = self._setop_operand(node.left)
+        right_sql = self._setop_operand(node.right)
         return f"{left_sql} {self._setop_keyword(node.op_name)} {right_sql}"
 
     # --- Cross Product ---
