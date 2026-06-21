@@ -44,10 +44,11 @@ Non-obvious constraints a cold worker would get wrong.
 - **`Attr` comparison operators return `Predicate`, not `bool` — a deliberate Liskov violation.** Build predicates with `&`/`|`/`~`; never `and`/`or`/`not` — those keywords invoke `Attr.__bool__`, which raises `PredicateError` by design. The `# type: ignore[override]` on `__eq__`/`__ne__` is load-bearing; the ordering ops (`__lt__` etc.) must **not** carry it (they are fresh defs, not overrides, and `warn_unused_ignores` will flag a stray one).
 - **`@dataclass(frozen=True)` only synthesizes dunders you didn't write.** `Attr` hand-writes `__eq__`/`__hash__` and stays frozen; nodes pass `eq=False` to *suppress* the synthesized pair. Touching either decorator silently changes equality/hash semantics across the tree.
 - **`Relation` is intentionally not a dataclass.** Its backing fields are named `_owning_engine` / `_table_name` / `_stored_schema` to avoid shadowing `BaseRelation`'s `_engine` property and `_schema()` method. Do not "dataclass-ify" it.
-- **`OuterJoin` defaults to `how="full"`** — a bare `.outer_join(x)` is the widest, most expensive join. Deliberate (ISSUES W1); kept for 1.0 API stability.
+- **`OuterJoin` defaults to `how="full"`** — a bare `.outer_join(x)` is the widest, most expensive join. Deliberate; kept for 1.0 API stability.
+- **`BaseRelation.__getattr__` raises a bare `AttributeError(name)` for `_`-prefixed names** — deliberate terseness on the hot internal-attribute-lookup path (the guard against recursing into `_schema()`/dunders). Accepted tradeoff: a genuinely-missing dunder surfaces as a context-free error, for names no user types.
 - **`RIGHT`/`FULL OUTER JOIN` require SQLite ≥ 3.39 (2022).** `how="left"` works everywhere; the other two raise `OperationalError` on older bundled SQLite.
 - **`INTERSECT ALL` / `EXCEPT ALL` are unsupported on SQLite.** `.bags()` over those ops raises a clear `NotImplementedError`, gated by `Dialect.setop_all_support`.
-- **PG `information_schema` introspection hardcodes `%s`** and relies on psycopg's paramstyle tolerance (ISSUES W3) — it is *not* routed through `Dialect`. A strict-paramstyle PostgreSQL driver would break it.
+- **PG `information_schema` introspection hardcodes `%s`** and relies on psycopg's paramstyle tolerance — it is *not* routed through `Dialect`. A strict-paramstyle PostgreSQL driver would break it.
 - **Backend coverage:** SQLite is exercised by every CI test. The PG/MySQL paramstyle, quoting, and introspection branches exist but are not round-tripped against a live database in CI — treat them as inference until the Postgres job asserts on a parameterized round-trip.
 
 ## Flow
@@ -69,7 +70,7 @@ and a plain-English reading side by side.
 - **Add a database backend:** paramstyle is auto-sniffed via PEP 249; add quote-char and `setop_all_support` branches to `Dialect` (`engine.py`) and verify `Engine` introspection.
 - **Add an aggregate:** `aggregates.py` (`AggSpec` + constructor) and the `_compile_grouping` path; validate the aggregate attribute eagerly in `Grouping.__post_init__`.
 - **Change SQL rendering:** `display.py` — `format_sql`'s keyword list is ordered longest-first on purpose (so `LEFT OUTER JOIN` matches before bare `JOIN`).
-- **Record a decision or known issue:** `ISSUES.md` (the maintained log).
+- **Record a design decision:** here (Landmines / Invariants) or [THEORY.md](THEORY.md); **track a defect or improvement:** GitHub issues.
 
 ---
 

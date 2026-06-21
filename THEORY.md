@@ -106,8 +106,7 @@ understand why this isn't negotiable:
   default) compares fields tuple-wise, which reaches an `Attr`, which returns a
   `Predicate`, on which `bool()` raises. So `node == node`, `node in [...]`, and
   `set(nodes)` would *all* raise `PredicateError` — and dict-bearing nodes
-  (`Grouping`, `Rename`) would additionally be unhashable. (See ISSUES A1 for
-  the full failure analysis.)
+  (`Grouping`, `Rename`) would additionally be unhashable.
 - **The tree *wants* identity anyway.** The engine-equivalence check uses `is`,
   and `Attr` hashes on `id(self.source)`. The relational model treats relations
   by value, but the *expression objects* modeling them are most usefully treated
@@ -131,7 +130,7 @@ the error has to land on the offending step or it teaches nothing.
 This invariant is asserted in module headers, in `schema.py`, and in the test
 suite's phase banners — which is what made two *holes* in it visible and worth
 fixing: aggregate-attribute existence and `Equijoin` output-collision were
-originally deferred to `_schema()` (ISSUES C2, A2). They're now closed, so the
+originally deferred to `_schema()`. Both are now fixed, so the
 documented guarantee holds literally. The lesson for a maintainer: a new node's
 `__post_init__` must validate everything the node could get wrong, because the
 whole suite of sibling nodes — and the docs — promise it does.
@@ -175,29 +174,29 @@ Relational division — "find X associated with *all* Y" — has no SQL keyword 
 compiles to the notoriously opaque `NOT EXISTS … EXCEPT … NOT EXISTS`
 double-negation. The library renders the algebra (`÷`) next to that SQL so the
 pattern clicks. This is why the compiler is careful to parenthesize division's
-inner `EXCEPT` — and, by the same token, why the chained set-op bug (ISSUES C1)
+inner `EXCEPT` — and, by the same token, why the chained set-op bug
 was a real problem and not a quibble: the author already knew parentheses were
 load-bearing for `EXCEPT`; one code path just hadn't applied the knowledge.
 
 ## Design decisions and tradeoffs
 
-The decision *record* is `ISSUES.md` (resolved findings) and its "Won't fix / by
-design" section; this section synthesizes the load-bearing ones and cites the
-entry rather than reproducing the log, which is maintained and will keep moving.
+This section is the standing record of the load-bearing decisions and the
+"won't fix / by design" calls behind them. Ongoing defects and improvements are
+tracked as GitHub issues.
 
-- **`OuterJoin` defaults to `how="full"`** (ISSUES W1). `full` carries the most
+- **`OuterJoin` defaults to `how="full"`.** `full` carries the most
   information, so it's a defensible default; the real reason it stays is that
   changing it would be a breaking API change at 1.0. A maintainer might still
   consider making `how` *required* for explicitness in a teaching API — the
   decision was to keep the default, not that requiring it would be wrong.
 
-- **`__getattr__` raises a bare `AttributeError(name)` for `_`-prefixed names**
-  (ISSUES W2). This is the hot internal-attribute-lookup path; the terseness is
+- **`__getattr__` raises a bare `AttributeError(name)` for `_`-prefixed names.**
+  This is the hot internal-attribute-lookup path; the terseness is
   intentional. The tradeoff accepted: a genuinely-missing dunder surfaces as a
   context-free error. Kept because the path's speed matters more than the
   message for names no user types.
 
-- **PG introspection hardcodes `%s`** (ISSUES W3) instead of routing through
+- **PG introspection hardcodes `%s`** instead of routing through
   `Dialect`. A documented reliance on psycopg's paramstyle tolerance; the
   decision is to revisit only if a strict-paramstyle PG driver appears. It is
   the one live exception to "all SQL flows through the Dialect," and it is
@@ -236,7 +235,7 @@ core ideas:
   SQL.
 - *Set semantics by default* is the honesty-to-the-algebra choice (Core idea 5).
 - *Set-op operands wrapped when nested* is division's parenthesization lesson
-  generalized (Core idea 6 / ISSUES C1).
+  generalized (Core idea 6).
 
 ## Where the bodies are buried
 
@@ -249,11 +248,11 @@ core ideas:
   mixed single- and double-underscore mangling here inconsistently.
 - **SQLite's "double-quoted unknown identifier becomes a string literal"
   misfeature** is why a typo'd aggregate attribute could silently return `0.0`
-  instead of erroring (ISSUES C2). The fix is eager validation, but the misfeature
+  instead of erroring. The fix is eager validation, but the misfeature
   is worth remembering whenever you build an identifier you didn't validate.
 - **`format_sql`'s keyword list is ordered longest-first on purpose** — process
   `JOIN` before `LEFT OUTER JOIN` and you split the multi-word keyword across two
-  lines (ISSUES E1). The ordering is the fix; don't "alphabetize" it.
+  lines. The ordering is the fix; don't "alphabetize" it.
 - **The non-`qmark` paramstyle branches and the `%s` introspection shortcut are
   only as trustworthy as the Postgres CI job's assertions.** They have unit
   coverage for placeholder shape, but a live parameterized round-trip on PG/MySQL
