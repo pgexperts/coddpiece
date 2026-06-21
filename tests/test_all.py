@@ -1181,3 +1181,74 @@ class TestOuterJoinFormatting:
             ln.startswith("  ") and ln.strip().startswith("FROM")
             for ln in sql.split("\n")
         ), sql
+
+
+class TestDialectParamStyles:
+    # Dialect.placeholder()/format_params() (engine.py) support all five PEP 249
+    # paramstyles, but only the SQLite default (qmark) is exercised elsewhere.
+    # Dialect sniffs paramstyle from the connection at construction, so we build
+    # the dialect via the engine fixture and override .paramstyle per case rather
+    # than fabricating a fake driver module. No database round-trip is needed:
+    # placeholder()/format_params() are pure string/collection transforms.
+    #
+    # The invariant under test is that placeholder names and format_params keys
+    # stay in lockstep: positional styles (qmark/numeric/format) get a list,
+    # name-bearing styles (named/pyformat) get a dict keyed p0, p1, ... matching
+    # the :p0 / %(p0)s tokens placeholder() emits.
+
+    # (token at index 0, token at index 1, container type from format_params)
+    CASES = {
+        "qmark": ("?", "?", list),
+        "numeric": (":1", ":2", list),
+        "named": (":p0", ":p1", dict),
+        "format": ("%s", "%s", list),
+        "pyformat": ("%(p0)s", "%(p1)s", dict),
+    }
+
+    def _dialect(self, engine, paramstyle):
+        # engine.dialect was constructed from the in-memory sqlite3 connection
+        # (default paramstyle 'qmark'); override it to drive each branch.
+        dialect = engine.dialect
+        dialect.paramstyle = paramstyle
+        return dialect
+
+    def test_placeholder_tokens_per_style(self, engine):
+        for style, (tok0, tok1, _container) in self.CASES.items():
+            dialect = self._dialect(engine, style)
+            assert dialect.placeholder(0) == tok0, style
+            assert dialect.placeholder(1) == tok1, style
+
+    def test_placeholder_default_index_is_zero(self, engine):
+        # placeholder() with no argument defaults to index 0; matters for the
+        # numeric/named/pyformat styles where the index is part of the token.
+        assert self._dialect(engine, "numeric").placeholder() == ":1"
+        assert self._dialect(engine, "named").placeholder() == ":p0"
+        assert self._dialect(engine, "pyformat").placeholder() == "%(p0)s"
+        # qmark/format ignore the index entirely.
+        assert self._dialect(engine, "qmark").placeholder() == "?"
+        assert self._dialect(engine, "format").placeholder() == "%s"
+
+    def test_format_params_container_per_style(self, engine):
+        for style, (_tok0, _tok1, container) in self.CASES.items():
+            dialect = self._dialect(engine, style)
+            formatted = dialect.format_params(["A", "B"])
+            assert isinstance(formatted, container), style
+
+    def test_format_params_positional_styles_return_list(self, engine):
+        # qmark/numeric/format bind by position, so the param list passes
+        # through unchanged.
+        for style in ("qmark", "numeric", "format"):
+            dialect = self._dialect(engine, style)
+            assert dialect.format_params(["A", "B"]) == ["A", "B"], style
+
+    def test_format_params_named_styles_return_keyed_dict(self, engine):
+        # named/pyformat bind by name; keys p0, p1, ... must match the
+        # :p0 / %(p0)s tokens emitted by placeholder().
+        for style in ("named", "pyformat"):
+            dialect = self._dialect(engine, style)
+            assert dialect.format_params(["A", "B"]) == {"p0": "A", "p1": "B"}, style
+
+    def test_placeholder_unknown_style_falls_back_to_qmark(self, engine):
+        # The match statement's wildcard arm defends against an unrecognized
+        # paramstyle by emitting '?' rather than an unbindable token.
+        assert self._dialect(engine, "bogus").placeholder(3) == "?"
