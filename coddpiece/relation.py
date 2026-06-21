@@ -330,9 +330,17 @@ class Relation(BaseRelation):
 # frozen=True: immutability is critical because expression trees may share
 # subtrees across multiple expressions, and the compiler assumes the tree
 # is stable during traversal.
+# eq=False: fall back to object identity for __eq__ AND __hash__. The default
+# eq=True would generate an __eq__ that compares fields, reaching Attr.__eq__
+# (predicates.py) which returns a Predicate whose __bool__ raises — so
+# node1 == node2 and `node in [...]` would blow up. It would also derive a
+# __hash__ from the fields, which raises TypeError on the dict-valued fields of
+# Grouping (aggs) and Rename (mapping). Expression-tree equivalence is identity,
+# not structure, so object identity is the correct (and only safe) semantics.
+# This applies to every node dataclass below, not just Selection.
 # repr=False: inherit BaseRelation.__repr__ (shows class name, relation_name,
 # schema) instead of the dataclass default which would expose internal fields.
-@dataclass(frozen=True, repr=False)
+@dataclass(frozen=True, eq=False, repr=False)
 class Selection(BaseRelation):
     """σ (Selection): Filter rows by a predicate.
 
@@ -356,7 +364,7 @@ class Selection(BaseRelation):
         return self.child.relation_name
 
 
-@dataclass(frozen=True, repr=False)
+@dataclass(frozen=True, eq=False, repr=False)
 class Projection(BaseRelation):
     """π (Projection): Keep only specified attributes.
 
@@ -390,7 +398,7 @@ class Projection(BaseRelation):
 # ---------------------------------------------------------------------------
 
 
-@dataclass(frozen=True, repr=False)
+@dataclass(frozen=True, eq=False, repr=False)
 class Rename(BaseRelation):
     """ρ (Rename): Rename attributes. mapping is {new_name: old_name}.
 
@@ -497,7 +505,7 @@ class Difference(_SetOp):
 # ---------------------------------------------------------------------------
 
 
-@dataclass(frozen=True, repr=False)
+@dataclass(frozen=True, eq=False, repr=False)
 class CrossProduct(BaseRelation):
     """× (Cross Product): Cartesian product.
 
@@ -527,7 +535,7 @@ class CrossProduct(BaseRelation):
         return f"({self.left.relation_name} × {self.right.relation_name})"
 
 
-@dataclass(frozen=True, repr=False)
+@dataclass(frozen=True, eq=False, repr=False)
 class NaturalJoin(BaseRelation):
     """⋈ (Natural Join): Join on common attributes.
 
@@ -567,7 +575,7 @@ class NaturalJoin(BaseRelation):
         return f"({self.left.relation_name} ⋈ {self.right.relation_name})"
 
 
-@dataclass(frozen=True, repr=False)
+@dataclass(frozen=True, eq=False, repr=False)
 class ThetaJoin(BaseRelation):
     """⋈θ (Theta Join): Join with an arbitrary predicate.
 
@@ -598,7 +606,7 @@ class ThetaJoin(BaseRelation):
         return f"({self.left.relation_name} ⋈θ {self.right.relation_name})"
 
 
-@dataclass(frozen=True, repr=False)
+@dataclass(frozen=True, eq=False, repr=False)
 class Equijoin(BaseRelation):
     """⋈= (Equijoin): Join where left_attr = right_attr.
 
@@ -625,6 +633,20 @@ class Equijoin(BaseRelation):
                 f"Right relation has no attribute {self.right_attr!r}. "
                 f"Available: {', '.join(self.right._schema().names())}"
             )
+        # Eager-validation invariant: the ambiguous-output-name check must run
+        # at construction, not lazily in _schema(). The right join column is
+        # dropped from the output (left_attr = right_attr makes it redundant),
+        # so we test the *remaining* right attrs against the left names. Mirrors
+        # _schema()'s derivation exactly so the two paths can never diverge.
+        right_attrs = tuple(
+            a for a in self.right._schema().attributes if a.name != self.right_attr
+        )
+        collisions = {a.name for a in right_attrs} & set(self.left._schema().names())
+        if collisions:
+            raise SchemaError(
+                f"EQUIJOIN result has ambiguous attribute names: {collisions}. "
+                f"Hint: Use RENAME on one relation first."
+            )
 
     @property
     def _engine(self) -> Engine:
@@ -633,19 +655,14 @@ class Equijoin(BaseRelation):
     def _schema(self) -> Schema:
         # Unlike cross product, equijoin drops the duplicate join column from
         # the right side (since left_attr = right_attr, keeping both is
-        # redundant). Then we check for remaining name collisions.
+        # redundant). The name-collision check lives in __post_init__ (eager
+        # validation), so by the time this node exists the result is known to
+        # be unambiguous and we only need to shape the schema here.
         left_s = self.left._schema()
         right_s = self.right._schema()
         right_attrs = tuple(
             a for a in right_s.attributes if a.name != self.right_attr
         )
-        left_names = set(left_s.names())
-        collisions = {a.name for a in right_attrs} & left_names
-        if collisions:
-            raise SchemaError(
-                f"EQUIJOIN result has ambiguous attribute names: {collisions}. "
-                f"Hint: Use RENAME on one relation first."
-            )
         return Schema(left_s.attributes + right_attrs)
 
     @property
@@ -658,7 +675,7 @@ class Equijoin(BaseRelation):
 # ---------------------------------------------------------------------------
 
 
-@dataclass(frozen=True, repr=False)
+@dataclass(frozen=True, eq=False, repr=False)
 class Semijoin(BaseRelation):
     """⋉ (Semijoin): Left tuples that have a match in right.
 
@@ -692,7 +709,7 @@ class Semijoin(BaseRelation):
         return f"({self.left.relation_name} ⋉ {self.right.relation_name})"
 
 
-@dataclass(frozen=True, repr=False)
+@dataclass(frozen=True, eq=False, repr=False)
 class Antijoin(BaseRelation):
     """▷ (Antijoin): Left tuples with NO match in right.
 
@@ -726,7 +743,7 @@ class Antijoin(BaseRelation):
         return f"({self.left.relation_name} ▷ {self.right.relation_name})"
 
 
-@dataclass(frozen=True, repr=False)
+@dataclass(frozen=True, eq=False, repr=False)
 class OuterJoin(BaseRelation):
     """⟕⟖⟗ (Outer Join): Join preserving unmatched tuples.
 
@@ -777,7 +794,7 @@ class OuterJoin(BaseRelation):
 # ---------------------------------------------------------------------------
 
 
-@dataclass(frozen=True, repr=False)
+@dataclass(frozen=True, eq=False, repr=False)
 class Grouping(BaseRelation):
     """γ (Grouping/Aggregation).
 
@@ -843,7 +860,7 @@ class Grouping(BaseRelation):
 # ---------------------------------------------------------------------------
 
 
-@dataclass(frozen=True, repr=False)
+@dataclass(frozen=True, eq=False, repr=False)
 class Division(BaseRelation):
     """÷ (Division): Tuples associated with ALL tuples in the divisor.
 

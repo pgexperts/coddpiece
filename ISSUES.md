@@ -35,7 +35,7 @@ Legend: `[ ]` open · `[x]` resolved · `[~]` won't fix / by design.
 
 ## P2 — API design / node semantics
 
-- [ ] **A1 · Expression-tree nodes have value-equality enabled, and it raises.**
+- [x] **A1 · Expression-tree nodes have value-equality enabled, and it raises.**
   The node dataclasses use the default `eq=True`. The generated `__eq__` compares
   fields tuple-wise, reaching `Attr.__eq__`, which returns a `Predicate`;
   `bool()` on it raises `PredicateError`. So `node == node`, `node in [...]`, and
@@ -44,7 +44,7 @@ Legend: `[ ]` open · `[x]` resolved · `[~]` won't fix / by design.
   *Fix:* `eq=False` on the node dataclasses (identity equality + identity hash —
   what the immutable tree actually wants). Regression test: `==`/`hash` behave.
 
-- [ ] **A2 · `Equijoin` defers its output-collision check to `_schema()`.**
+- [x] **A2 · `Equijoin` defers its output-collision check to `_schema()`.**
   `Equijoin.__post_init__` validates only join-attribute existence; the
   ambiguous-output-name `SchemaError` surfaces only when `_schema()` is later
   evaluated, unlike every sibling node. Eager-validation invariant hole.
