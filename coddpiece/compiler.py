@@ -17,6 +17,14 @@ Hard invariants enforced here:
   * Each expression node is visited exactly once per compile, with
     one documented exception: Division, which needs the dividend
     subtree twice to build its correlated subquery.
+  * Parameters are appended to self.params in the SAME left-to-right
+    order their placeholders appear in the emitted SQL text. Positional
+    paramstyles (qmark "?", format "%s") bind the Nth value to the Nth
+    placeholder, so any compile method that emits multiple sources must
+    visit them in textual order. Division relies on this most subtly:
+    the outer dividend FROM is rendered first (via _as_source at the
+    top), then the divisor, then the re-visited inner dividend — which
+    is exactly the order those placeholders appear in the final string.
 """
 
 from __future__ import annotations
