@@ -979,3 +979,114 @@ class TestGroupingAggValidation:
         result = sp.group("sno", n=count("pno"), t=sum_("qty")).collect()
         result_dict = {row[0]: (row[1], row[2]) for row in result}
         assert result_dict["S1"] == (6, 1300)
+
+
+class TestNodeIdentity:
+    # Expression-node dataclasses use eq=False, so == and hash() are identity-
+    # based. Without it, the generated __eq__ reaches Attr.__eq__ (which returns
+    # a Predicate whose __bool__ raises) and the generated __hash__ chokes on
+    # the dict fields of Grouping/Rename. These tests pin the identity semantics.
+
+    def test_node_equals_itself(self, sp_data):
+        s, p, sp, engine = sp_data
+        node = s.select(s.city == "London")
+        assert (node == node) is True
+
+    def test_distinct_nodes_not_equal_no_raise(self, sp_data):
+        # Two structurally-identical Selections off the SAME leaf used to reach
+        # Attr.__eq__ and raise PredicateError on ==. Identity makes them unequal.
+        s, p, sp, engine = sp_data
+        a = s.select(s.city == "London")
+        b = s.select(s.city == "London")
+        assert a is not b
+        assert (a == b) is False
+        assert (a != b) is True
+
+    def test_nested_predicate_child_equality_no_raise(self, sp_data):
+        # Worst case: a Grouping whose child is itself a Selection holding an
+        # Attr comparison. eq=True would recurse into Attr.__eq__ and raise.
+        s, p, sp, engine = sp_data
+        ga = sp.select(sp.sno == "S1").group("sno", n=count())
+        gb = sp.select(sp.sno == "S1").group("sno", n=count())
+        assert (ga == gb) is False
+
+    def test_membership_check_no_raise(self, sp_data):
+        s, p, sp, engine = sp_data
+        a = s.select(s.city == "London")
+        b = s.select(s.city == "London")
+        assert a not in [b]
+        assert a in [a, b]
+
+    def test_grouping_hashable_and_identity_keyed(self, sp_data):
+        # Grouping.aggs is a dict; the generated __hash__ raised TypeError.
+        s, p, sp, engine = sp_data
+        g1 = sp.group("sno", n=count())
+        g2 = sp.group("sno", n=count())
+        assert isinstance(hash(g1), int)
+        assert len({g1, g2}) == 2
+        assert g1 in {g1, g2}
+
+    def test_rename_hashable_and_identity_keyed(self, sp_data):
+        # Rename.mapping is a dict; same TypeError-on-hash failure mode.
+        s, p, sp, engine = sp_data
+        r1 = s.rename(town="city")
+        r2 = s.rename(town="city")
+        assert isinstance(hash(r1), int)
+        assert len({r1, r2}) == 2
+        d = {r1: "first"}
+        assert d[r1] == "first"
+        assert r2 not in d
+
+    def test_every_node_dataclass_uses_identity_eq_and_hash(self):
+        # Belt-and-suspenders: any future decorator regression that re-enables
+        # structural eq/hash on a node class trips this immediately.
+        from coddpiece.relation import (
+            Antijoin,
+            CrossProduct,
+            Division,
+            Equijoin,
+            Grouping,
+            NaturalJoin,
+            OuterJoin,
+            Projection,
+            Rename,
+            Selection,
+            Semijoin,
+            ThetaJoin,
+        )
+        node_classes = [
+            Selection, Projection, Rename, CrossProduct, NaturalJoin,
+            ThetaJoin, Equijoin, Semijoin, Antijoin, OuterJoin, Grouping,
+            Division,
+        ]
+        for cls in node_classes:
+            assert cls.__eq__ is object.__eq__, f"{cls.__name__} has structural __eq__"
+            assert cls.__hash__ is object.__hash__, f"{cls.__name__} has structural __hash__"
+
+
+class TestEquijoinEagerValidation:
+    # Equijoin's ambiguous-output-name check now runs at construction
+    # (__post_init__), matching every other node's eager-validation contract,
+    # instead of firing lazily on a later _schema()/schema() call.
+    def test_equijoin_collision_raises_at_construction(self, engine):
+        # Both relations carry a non-join 'shared' column, so the equijoin
+        # output would have two columns named 'shared' -> ambiguous.
+        a = engine.create(
+            "eq_a", {"k": int, "shared": int, "av": int}, rows=[(1, 9, 100)]
+        )
+        b = engine.create(
+            "eq_b", {"j": int, "shared": int, "bv": int}, rows=[(1, 9, 200)]
+        )
+        with pytest.raises(SchemaError, match="ambiguous"):
+            a.equijoin(b, "k", "j")
+
+    def test_equijoin_dropped_right_column_does_not_collide(self, engine):
+        # The dropped right join column ('j') must not be counted as a
+        # collision; construction succeeds with the correct schema and rows.
+        a = engine.create(
+            "eq_c", {"k": int, "shared": int, "av": int}, rows=[(1, 9, 100)]
+        )
+        c = engine.create("eq_d", {"j": int, "cv": int}, rows=[(1, 5)])
+        joined = a.equijoin(c, "k", "j")  # must not raise
+        assert joined.schema().names() == ("k", "shared", "av", "cv")
+        assert joined.collect() == [(1, 9, 100, 5)]
