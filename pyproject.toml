@@ -78,3 +78,7 @@ warn_redundant_casts = true
 warn_unreachable = true
 no_implicit_optional = true
 check_untyped_defs = true
+# A py.typed package should not leak bare `list`/`dict`/`tuple` (implicit
+# Any element types) to consumers. The whole package is clean under this,
+# so enforce it in CI to stop the generics from silently regressing.
+disallow_any_generics = true
