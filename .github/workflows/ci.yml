@@ -82,3 +82,36 @@ jobs:
           # is gated on this env var being present.
           DATABASE_URL: postgresql://postgres:postgres@localhost:5432/coddpiece_test
         run: python -m pytest tests/test_postgres.py -v
+
+  # Separate job: scan the installed dependency tree for known
+  # vulnerabilities with pip-audit. This is intentionally REPORT-ONLY
+  # (continue-on-error) so a freshly-published advisory can never turn
+  # the pipeline red on byte-identical code -- audit/perf steps inform,
+  # they don't gate. Only correctness (test, lint, type-check) blocks a
+  # merge. Re-triage findings here rather than treating them as failures.
+  audit:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          # Install the package WITH its optional extras so pip-audit scans
+          # the packages coddpiece actually pulls in (pytest, ruff, mypy,
+          # psycopg). coddpiece declares no unconditional runtime deps, so
+          # without the extras the audit surface would be effectively empty.
+          pip install -e ".[dev,postgres]"
+          pip install pip-audit
+
+      # continue-on-error keeps this step non-blocking: it surfaces
+      # advisories in the job log/summary without failing the workflow.
+      - name: Audit dependencies with pip-audit
+        continue-on-error: true
+        run: pip-audit

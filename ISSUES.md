@@ -90,7 +90,7 @@ Legend: `[ ]` open · `[x]` resolved · `[~]` won't fix / by design.
 
 ## P6 — CI / tooling
 
-- [ ] **I1 · No dependency-audit step.** Add a report-only `pip-audit` job
+- [x] **I1 · No dependency-audit step.** Add a report-only `pip-audit` job
   (non-blocking, per the repo's perf/audit-is-report-only convention) so shipped
   dependencies are scanned without gating the pipeline on advisory noise.
 
