@@ -26,6 +26,10 @@ jobs:
       # token that PyPI exchanges for a one-time upload credential. No API
       # token is stored in the repo, in Actions secrets, or anywhere else.
       id-token: write
+      # Declaring a permissions block drops every UNLISTED scope to `none`, so
+      # contents must be granted explicitly — otherwise actions/checkout has no
+      # read access and fails with a misleading "Repository not found".
+      contents: read
 
     steps:
       - uses: actions/checkout@v4
