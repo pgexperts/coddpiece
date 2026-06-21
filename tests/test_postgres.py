@@ -1,9 +1,10 @@
 """PostgreSQL-targeted tests.
 
 These exercise the dialect branches that the main SQLite suite cannot
-reach: psycopg's `format` paramstyle (`%s` placeholders), introspection
-via `information_schema`, the division SQL whose unaliased derived
-tables PostgreSQL strictly rejects, and bag-mode INTERSECT ALL /
+reach: psycopg's `pyformat` paramstyle (`%(p0)s` placeholders bound from
+a dict; the bare `format`/`%s` style belongs to pg8000, not psycopg),
+introspection via `information_schema`, the division SQL whose unaliased
+derived tables PostgreSQL strictly rejects, and bag-mode INTERSECT ALL /
 EXCEPT ALL (which SQLite does not implement at all).
 
 Every test depends on the `pg_engine` fixture in conftest.py — that
@@ -51,10 +52,10 @@ class TestPGEngineBasics:
         assert wrapped.schema().domains() == (int, str, float)
 
     def test_select_with_string_param(self, pg_engine):
-        # Forces a parameterized SELECT through psycopg's `format`
-        # paramstyle: the compiler emits %s and binds "alpha" as a
-        # parameter. A regression in placeholder generation would surface
-        # here as a driver-level error.
+        # Forces a parameterized SELECT through psycopg's `pyformat`
+        # paramstyle: the compiler emits %(p0)s and binds "alpha" as a
+        # dict-keyed parameter (via Dialect.format_params). A regression in
+        # placeholder generation would surface here as a driver-level error.
         r = pg_engine.create(
             "pg_param",
             {"id": int, "name": str},
