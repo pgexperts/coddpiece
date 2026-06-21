@@ -196,3 +196,37 @@ class TestPGGrouping:
         by_sno = {row[0]: (row[1], row[2]) for row in result}
         assert by_sno["S1"] == (2, 300)
         assert by_sno["S2"] == (1, 50)
+
+
+class TestNestedSetOpsPostgres:
+    # Cross-backend confirmation of the nested set-op fix: the compiler
+    # subquery-wraps any operand that is itself a set operation, e.g.
+    # "... EXCEPT SELECT cols FROM (b EXCEPT c) AS tN". PostgreSQL REQUIRES
+    # the derived-table alias (SQLite merely tolerates it), so this is where
+    # the chosen wrap form is actually load-bearing for portability.
+    def test_except_right_nesting_pg(self, pg_engine):
+        a = pg_engine.create("pnse_a", {"x": int}, rows=[(1,), (2,), (3,)])
+        b = pg_engine.create("pnse_b", {"x": int}, rows=[(2,), (3,), (4,)])
+        c = pg_engine.create("pnse_c", {"x": int}, rows=[(3,), (4,), (5,)])
+        expr = a.difference(b.difference(c))
+        assert sorted(r[0] for r in expr.collect()) == [1, 3]
+
+    def test_union_over_intersect_pg(self, pg_engine):
+        # PostgreSQL gives INTERSECT higher precedence than UNION, so the
+        # unwrapped flat form would mis-evaluate here; the wrap makes the
+        # tree's grouping explicit and portable.
+        a = pg_engine.create("pnui_a", {"x": int}, rows=[(1,), (2,), (3,)])
+        b = pg_engine.create("pnui_b", {"x": int}, rows=[(2,), (3,), (4,)])
+        c = pg_engine.create("pnui_c", {"x": int}, rows=[(3,), (4,), (5,)])
+        expr = a.union(b.intersect(c))
+        assert sorted(r[0] for r in expr.collect()) == [1, 2, 3, 4]
+
+    def test_nested_intersect_all_pg(self, pg_engine):
+        # PostgreSQL DOES implement INTERSECT ALL, so bag mode over nested
+        # INTERSECT must execute (not raise) and preserve multiset semantics.
+        d = pg_engine.create("pnia_d", {"x": int}, rows=[(1,), (1,), (2,), (3,)])
+        e = pg_engine.create("pnia_e", {"x": int}, rows=[(1,), (1,), (2,)])
+        f = pg_engine.create("pnia_f", {"x": int}, rows=[(1,), (2,)])
+        # e ∩ALL f over [1,1,2] and [1,2] = [1,2]; d ∩ALL [1,2] = [1,2].
+        rows = sorted(r[0] for r in d.intersect(e.intersect(f)).bags().collect())
+        assert rows == [1, 2]

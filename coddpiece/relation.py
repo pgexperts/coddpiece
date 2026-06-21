@@ -803,6 +803,18 @@ class Grouping(BaseRelation):
                     f"Grouping key {k!r} not in schema. "
                     f"Available: {', '.join(schema.names())}"
                 )
+        # Validate aggregate target attributes the same way. Skip "*"
+        # (COUNT(*) has no column). Without this check an unknown attr is
+        # emitted as a quoted identifier, which SQLite silently reads as a
+        # string literal — SUM/AVG of it returns 0.0 with no error — so the
+        # bug surfaces as wrong numbers rather than a diagnostic, far from
+        # the offending source line.
+        for agg in self.aggs.values():
+            if agg.attr != "*" and agg.attr not in schema:
+                raise AttributeError_(
+                    f"Aggregate attribute {agg.attr!r} not in schema. "
+                    f"Available: {', '.join(schema.names())}"
+                )
 
     @property
     def _engine(self) -> Engine:
